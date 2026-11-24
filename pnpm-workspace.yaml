@@ -1,0 +1,12 @@
+packages:
+  - apps/*
+  - packages/*
+
+onlyBuiltDependencies:
+  - "@prisma/engines"
+  - prisma
+  - esbuild
+  - "@nestjs/core"
+
+ignoredBuiltDependencies:
+  - "@parcel/watcher"

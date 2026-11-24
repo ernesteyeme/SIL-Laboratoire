@@ -1,0 +1,31 @@
+# Image de l'API, construite à partir d'une version publiée (dossier lims-x.y.z décompressé) :
+#   docker build -f docker/Dockerfile.api -t lims-api:1.7.0 lims-1.7.0/
+# Aucune compilation ici : dist/ et les dépendances de production sont déjà dans la version.
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE}
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-client ca-certificates tini curl \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=3000 \
+    LIMS_HOME=/opt/lims \
+    TZ=Africa/Kinshasa
+
+COPY RELEASE.json package.json /opt/lims/current/
+COPY apps/api /opt/lims/current/apps/api
+COPY scripts /opt/lims/current/scripts
+COPY docker/entrypoint-api.sh /usr/local/bin/lims-entrypoint
+
+RUN chmod 0755 /usr/local/bin/lims-entrypoint \
+ && useradd --system --no-create-home --shell /usr/sbin/nologin lims
+
+WORKDIR /opt/lims/current/apps/api
+USER lims
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:3000/api/health || exit 1
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lims-entrypoint"]
+CMD ["node", "dist/main.js"]

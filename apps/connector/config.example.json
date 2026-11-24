@@ -1,0 +1,14 @@
+{
+  "apiUrl": "https://sil.mon-laboratoire.cd/api",
+  "instrumentKey": "sil_xn1000_…",
+  "protocol": "astm",
+  "mode": "tcp-server",
+  "host": "0.0.0.0",
+  "port": 5000,
+  "encoding": "latin1",
+  "hostQuery": true,
+  "dataDir": "donnees",
+  "folder": "depot",
+  "extensions": [".txt", ".csv", ".astm", ".hl7"],
+  "pollSeconds": 10
+}

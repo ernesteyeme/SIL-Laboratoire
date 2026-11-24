@@ -1,0 +1,50 @@
+# Publication d'une version : pousser une étiquette vX.Y.Z (identique à « version » de package.json).
+#   git tag v1.7.0 && git push origin v1.7.0
+# Construit l'archive autonome (tests compris) et la publie dans GitHub Releases avec son empreinte et
+# latest.json : install.sh et « sudo lims update » y prennent la dernière version.
+name: Publication
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: L'étiquette correspond à la version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "::error::Étiquette ${GITHUB_REF_NAME} ≠ version ${version} de package.json"; exit 1; }
+      - name: Construction de la version (tests compris)
+        env:
+          LIMS_COMMIT: ${{ github.sha }}
+        run: bash scripts/make-release.sh
+      - name: Publication dans GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "Installation (Ubuntu 24.04 LTS) :"
+            echo
+            echo '```bash'
+            echo "cd ~ && wget -O install.sh \"https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh?v=\$(date +%s)\" && sudo bash install.sh"
+            echo '```'
+            echo
+            echo "Mise à jour d'un serveur existant : \`sudo lims update\`."
+            echo
+            echo "Empreinte SHA-256 : \`$(cut -d' ' -f1 dist-release/lims-${version}.tar.gz.sha256)\`"
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist-release/lims-${version}.tar.gz" "dist-release/lims-${version}.tar.gz.sha256" dist-release/latest.json \
+            --title "LIMS ${version}" --notes-file notes.md

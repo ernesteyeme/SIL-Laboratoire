@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lims-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lims
+      POSTGRES_USER: lims
+      POSTGRES_PASSWORD: lims_dev_password
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - lims_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lims -d lims"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lims_pgdata:

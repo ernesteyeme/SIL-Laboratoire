@@ -1,0 +1,55 @@
+# Déploiement Docker du LIMS (évaluation, formation, petits sites). Pour un laboratoire en production,
+# l'installation Ubuntu (scripts/setup.sh) reste recommandée, comme pour InteLIS.
+# Démarrage et mises à jour : docker/lims-docker.sh (install, update, backup, restore, status…).
+name: lims
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant}
+      TZ: ${TZ:-Africa/Kinshasa}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: lims-api:${LIMS_VERSION:?LIMS_VERSION manquant}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LIMS_ADMIN_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      LIMS_APP_DB_PASSWORD: ${LIMS_APP_DB_PASSWORD:?LIMS_APP_DB_PASSWORD manquant}
+      NODE_ENV: production
+      CORS_ORIGINS: https://${LIMS_HOSTNAME:-lims}
+      TRUST_PROXY: "true"
+      COOKIE_SECURE: "true"
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET manquant}
+      INTEROP_SECRET_KEY: ${INTEROP_SECRET_KEY:?INTEROP_SECRET_KEY manquant}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      TZ: ${TZ:-Africa/Kinshasa}
+
+  web:
+    image: lims-web:${LIMS_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      LIMS_HOSTNAME: ${LIMS_HOSTNAME:-lims}
+      LIMS_EXTRA_SAN: ${LIMS_EXTRA_SAN:-}
+    ports:
+      - "${LIMS_HTTP_PORT:-80}:80"
+      - "${LIMS_HTTPS_PORT:-443}:443"
+    volumes:
+      - tls:/etc/lims/tls
+
+volumes:
+  pgdata:
+  tls:

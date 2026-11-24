@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# lims — la porte d'entrée unique pour exploiter un serveur du LIMS (comme « intelis » pour InteLIS).
+#
+#   lims                       menu numéroté des commandes courantes
+#   lims update [--source X]   mettre à jour vers une nouvelle version (sauvegarde, migrations, retour arrière auto)
+#   lims rollback              revenir à la version précédente
+#   lims backup                sauvegarder maintenant, sur ce serveur et hors machine
+#   lims backup status|test|setup|enable|disable|key
+#   lims restore [--list] [--from-destination] [--file F] [--with-config]
+#   lims check [--quiet]       ce serveur peut-il faire tourner le LIMS ? (PASS / WARN / FAIL / SKIP)
+#   lims health [--quiet]      va-t-il bien maintenant ? (disque, base, API, sauvegardes)
+#   lims doctor [--check|--yes]  le site ne s'ouvre pas : diagnostic et réparations sûres
+#   lims status                services, version, adresse
+#   lims logs [api|nginx|postgresql|update|backup]
+#   lims restart               redémarrer l'API
+#   lims migrate [--baseline]  appliquer les migrations de la base
+#   lims setup-token [--new]   code demandé par l'assistant d'installation du navigateur
+#   lims reset-password <id>   mot de passe provisoire pour un compte (administrateur bloqué)
+#   lims certificate [show|renew]
+#   lims update-source <url>   source permanente des mises à jour (dossier contenant latest.json)
+#   lims housekeeping          purge des journaux et des sauvegardes anciennes
+#   lims version | help
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPTS="$(dirname "${SELF}")"
+for lib in common db-roles migrate system web services backup release checks; do
+    # shellcheck disable=SC1090
+    . "${SCRIPTS}/lib/${lib}.sh"
+done
+
+# Les commandes qui touchent au système demandent les droits administrateur au moment voulu.
+as_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        exec sudo --preserve-env=LIMS_HOME,NO_COLOR "${SELF}" "$@"
+    fi
+}
+
+usage() { sed -n '2,23p' "${SELF}" | sed 's/^# \{0,1\}//'; }
+
+menu() {
+    local items=("Mettre à jour le LIMS" "Sauvegarder maintenant" "État des sauvegardes" "Configurer les sauvegardes hors machine" "Restaurer une sauvegarde" "Vérifier l'installation" "Diagnostiquer (le site ne s'ouvre pas)" "Quitter") n
+    header "LIMS v$(app_version || echo '?') — $(hostname)"
+    n="$(choose "Que voulez-vous faire ?" "${items[@]}")"
+    case "${n}" in
+        1) exec "${SELF}" update ;;
+        2) exec "${SELF}" backup ;;
+        3) exec "${SELF}" backup status ;;
+        4) exec "${SELF}" backup setup ;;
+        5) exec "${SELF}" restore ;;
+        6) exec "${SELF}" check ;;
+        7) exec "${SELF}" doctor ;;
+        *) exit 0 ;;
+    esac
+}
+
+lims_status() {
+    local host
+    host="$(env_get LIMS_HOSTNAME 2>/dev/null || hostname)"
+    header "LIMS v$(app_version || echo '?')$( [ -n "$(app_commit)" ] && printf ' (%s)' "$(app_commit)")"
+    say "Adresse        : https://${host}/  ($(local_ips | tr '\n' ' '))"
+    say "Code           : $(current_release)"
+    if is_systemd; then
+        local u
+        for u in lims-api nginx postgresql; do printf '%-15s: %s\n' "${u}" "$(systemctl is-active "${u}" 2>/dev/null)"; done
+        say "Sauvegarde     : prochaine $(systemctl show lims-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null)"
+    fi
+}
+
+setup_token() {
+    local token
+    token="$(env_get SETUP_TOKEN || true)"
+    if [ -z "${token}" ] || [ "${1:-}" = "--new" ]; then
+        token="$(random_password 24)"
+        env_set SETUP_TOKEN "${token}"
+        chown root:"${LIMS_USER}" "${LIMS_ENV_FILE}"; chmod 0640 "${LIMS_ENV_FILE}"
+        api_restart || true
+        wait_for_api 30 >/dev/null || true
+    fi
+    if cli_run status 2>/dev/null | grep -q '"needsSetup":false'; then
+        warning "L'installation est déjà terminée : ce code ne sert plus."
+    fi
+    say "Code d'installation : ${token}"
+}
+
+certificate() {
+    local host; host="$(env_get LIMS_HOSTNAME)"
+    case "${1:-show}" in
+        show)
+            openssl x509 -in "$(cert_paths | cut -d' ' -f1)" -noout -subject -issuer -enddate -ext subjectAltName 2>/dev/null || die "Aucun certificat."
+            if [ "$(env_get LIMS_TLS_MODE || echo local)" = "local" ] && [ -s "$(TLS_DIR)/ca.crt" ]; then
+                say "Certificat de l'autorité locale pour les postes : http://${host}/lims-ca.crt"
+                say "Empreinte SHA-256 de l'autorité : $(openssl x509 -in "$(TLS_DIR)/ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
+            fi
+            ;;
+        renew)
+            if [ "$(env_get LIMS_TLS_MODE || echo local)" = "letsencrypt" ]; then certbot renew --quiet && systemctl reload nginx
+            else rm -f "$(TLS_DIR)/server.crt"; configure_https "${host}"; fi
+            ;;
+        *) die "Usage : lims certificate [show|renew]" ;;
+    esac
+}
+
+logs() {
+    case "${1:-api}" in
+        api) journalctl -u lims-api -n 200 --no-pager ;;
+        nginx) tail -n 200 /var/log/nginx/error.log ;;
+        postgresql) journalctl -u 'postgresql*' -n 200 --no-pager ;;
+        update) tail -n 200 "$(ls -1t "${LIMS_LOGS}"/update-*.log 2>/dev/null | head -n 1)" ;;
+        backup) tail -n 200 "${LIMS_LOGS}/backup.log" ;;
+        *) die "Usage : lims logs [api|nginx|postgresql|update|backup]" ;;
+    esac
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "${cmd}" in
+    "") if [ -t 0 ] && [ -t 1 ]; then menu; else usage; fi ;;
+    help|-h|--help) usage ;;
+    version|--version) say "LIMS v$(app_version || echo '?')$( [ -n "$(app_commit)" ] && printf ' (%s)' "$(app_commit)")" ;;
+    update|upgrade) as_root update "$@"; lims_update "$@" ;;
+    rollback) as_root rollback "$@"; lims_rollback "$@" ;;
+    backup)
+        as_root backup "$@"
+        case "${1:-}" in
+            status) backup_status ;;
+            key) backup_key_show ;;
+            test) offsite_test ;;
+            setup) backup_setup ;;
+            enable) backup_set_enabled 1 ;;
+            disable) backup_set_enabled 0 ;;
+            ""|--scheduled) lims_backup "$@" ;;
+            *) die "Usage : lims backup [status|test|setup|enable|disable|key]" ;;
+        esac
+        ;;
+    restore) as_root restore "$@"; lims_restore "$@" ;;
+    check|preflight) as_root check "$@"; lims_check "$@" ;;
+    health) as_root health "$@"; lims_health "$@" ;;
+    doctor|fix-site|fix-database|fix-db) as_root doctor "$@"; lims_doctor "$@" ;;
+    status) as_root status; lims_status ;;
+    logs) as_root logs "$@"; logs "$@" ;;
+    restart) as_root restart; api_restart && wait_for_api 60 >/dev/null && success "API redémarrée." ;;
+    migrate) as_root migrate "$@"; LIMS_OP_LOG="${LIMS_LOGS}/migrate.log" migrations_apply "${LIMS_HOME}/current" "${1:-}" ;;
+    setup-token) as_root setup-token "$@"; setup_token "$@" ;;
+    reset-password) as_root reset-password "$@"; [ -n "${1:-}" ] || die "Usage : lims reset-password <identifiant>"; cli_run reset-password "$1" ;;
+    certificate|cert) as_root certificate "$@"; certificate "$@" ;;
+    update-source) as_root update-source "$@"; [ -n "${1:-}" ] || die "Usage : lims update-source <url>"; printf 'UPDATE_URL=%s\n' "$1" > "${LIMS_STATE}/update.conf"; success "Source des mises à jour : $1" ;;
+    # Interne : appelée par « lims update » et « lims rollback » avec les scripts de la version activée.
+    reconfigure) as_root reconfigure; ensure_layout; reconfigure_system ;;
+    housekeeping) as_root housekeeping; lims_housekeeping && success "Entretien effectué." ;;
+    *) error "Commande inconnue : ${cmd}"; usage; exit 2 ;;
+esac

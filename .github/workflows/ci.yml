@@ -1,0 +1,31 @@
+# Intégration continue : types, tests unitaires (API, connecteur), scripts d'exploitation.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verifier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Dépendances
+        run: pnpm install --frozen-lockfile
+      - name: Vérification TypeScript (API + web)
+        run: pnpm typecheck
+      - name: Tests unitaires de l'API
+        run: pnpm test
+      - name: Tests du connecteur d'automate
+        run: node --test apps/connector/test/link.test.mjs
+      - name: Scripts d'installation et d'exploitation (shellcheck)
+        run: shellcheck -x -S warning scripts/install.sh scripts/setup.sh scripts/lims scripts/make-release.sh scripts/lib/*.sh docker/*.sh apps/connector/install/install-linux.sh

@@ -1,0 +1,22 @@
+{
+  "name": "lims",
+  "private": true,
+  "version": "1.7.0",
+  "description": "Système d'information de laboratoire (SIL) conforme ISO 15189",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build:shared": "pnpm --filter @lims/shared build",
+    "dev:api": "pnpm build:shared && pnpm --filter @lims/api dev",
+    "dev:web": "pnpm --filter @lims/web dev",
+    "build": "pnpm build:shared && pnpm --filter @lims/api build && pnpm --filter @lims/web build",
+    "test": "pnpm build:shared && pnpm --filter @lims/api test",
+    "typecheck": "pnpm build:shared && pnpm --filter @lims/api typecheck && pnpm --filter @lims/web typecheck",
+    "db:migrate": "pnpm --filter @lims/api db:migrate",
+    "db:seed": "pnpm --filter @lims/api db:seed",
+    "db:seed:catalog": "pnpm --filter @lims/api db:seed:catalog",
+    "release": "bash scripts/make-release.sh"
+  }
+}

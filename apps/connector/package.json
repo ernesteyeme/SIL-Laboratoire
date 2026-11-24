@@ -1,0 +1,14 @@
+{
+  "name": "@lims/connector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Connecteur de poste : relie un automate (ASTM E1381/E1394, HL7 MLLP, fichiers) au SIL.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": { "lims-connector": "src/index.mjs" },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test test/link.test.mjs",
+    "simulate": "node src/simulate-instrument.mjs"
+  }
+}

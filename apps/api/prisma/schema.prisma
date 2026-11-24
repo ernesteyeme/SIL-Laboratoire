@@ -1,0 +1,1277 @@
+// Schéma du socle (étape 1) : utilisateurs, sessions, piste d'audit, paramètres.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  RECEPTION
+  CAISSE
+  TECHNICIEN
+  BIOLOGISTE
+  QUALITE
+  COMPTABLE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  RESTORE
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  LOGOUT
+  PASSWORD_CHANGE
+  PASSWORD_RESET
+  ACCOUNT_LOCKED
+  ACCOUNT_UNLOCKED
+  ACCESS_DENIED
+  TOKEN_REUSE_DETECTED
+}
+
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  username           String    @unique @db.VarChar(50)
+  email              String?   @unique @db.VarChar(254)
+  fullName           String    @map("full_name") @db.VarChar(120)
+  passwordHash       String    @map("password_hash")
+  roles              Role[]
+  isActive           Boolean   @default(true) @map("is_active")
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  /// Incrémenté à chaque changement/réinitialisation de mot de passe ou désactivation :
+  /// invalide immédiatement tous les jetons d'accès émis auparavant.
+  tokenVersion       Int       @default(0) @map("token_version")
+  failedLoginCount   Int       @default(0) @map("failed_login_count")
+  lockedUntil        DateTime? @map("locked_until") @db.Timestamptz(6)
+  lastLoginAt        DateTime? @map("last_login_at") @db.Timestamptz(6)
+  passwordChangedAt  DateTime  @default(now()) @map("password_changed_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdById        String?   @map("created_by_id") @db.Uuid
+  deactivatedAt      DateTime? @map("deactivated_at") @db.Timestamptz(6)
+  deactivatedById    String?   @map("deactivated_by_id") @db.Uuid
+  deactivationReason String?   @map("deactivation_reason") @db.VarChar(500)
+  /// Compte technique d'un automate : aucun rôle, connexion refusée, absent de la liste des utilisateurs.
+  isServiceAccount   Boolean   @default(false) @map("is_service_account")
+
+  refreshTokens RefreshToken[]
+  instrument    Instrument?
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  /// Toutes les rotations d'une même connexion partagent la même famille.
+  familyId      String    @map("family_id") @db.Uuid
+  /// SHA-256 du secret ; le secret en clair n'est jamais stocké.
+  tokenHash     String    @map("token_hash") @db.VarChar(64)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason String?   @map("revoked_reason") @db.VarChar(32)
+  replacedById  String?   @map("replaced_by_id") @db.Uuid
+  ip            String?   @db.VarChar(64)
+  userAgent     String?   @map("user_agent") @db.VarChar(500)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+/// Piste d'audit en ajout seul. `seq`, `occurred_at`, `prev_hash` et `hash`
+/// sont calculés par un trigger PostgreSQL (voir migration 0001) ;
+/// UPDATE, DELETE et TRUNCATE sont bloqués au niveau de la base.
+model AuditLog {
+  id            BigInt      @id @default(autoincrement())
+  seq           BigInt      @unique @default(0)
+  occurredAt    DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  actorId       String?     @map("actor_id") @db.Uuid
+  actorUsername String?     @map("actor_username") @db.VarChar(50)
+  actorRoles    Role[]      @map("actor_roles")
+  action        AuditAction
+  entity        String      @db.VarChar(64)
+  entityId      String      @map("entity_id") @db.VarChar(64)
+  before        Json?
+  after         Json?
+  reason        String?     @db.VarChar(500)
+  requestId     String?     @map("request_id") @db.VarChar(64)
+  ip            String?     @db.VarChar(64)
+  userAgent     String?     @map("user_agent") @db.VarChar(500)
+  prevHash      String?     @map("prev_hash") @db.VarChar(64)
+  hash          String      @default("") @db.VarChar(64)
+
+  @@index([entity, entityId])
+  @@index([actorId])
+  @@index([occurredAt])
+  @@index([action])
+  @@map("audit_log")
+}
+
+/// Paramètres du laboratoire : une seule ligne (id = 1).
+model LabSettings {
+  id                  Int      @id @default(1)
+  name                String   @db.VarChar(200)
+  shortName           String?  @map("short_name") @db.VarChar(50)
+  address             String?  @db.VarChar(300)
+  city                String?  @db.VarChar(100)
+  country             String?  @db.VarChar(100)
+  phone               String?  @db.VarChar(50)
+  email               String?  @db.VarChar(254)
+  accreditationNumber String?  @map("accreditation_number") @db.VarChar(100)
+  accreditationBody   String?  @map("accreditation_body") @db.VarChar(200)
+  directorName        String?  @map("director_name") @db.VarChar(200)
+  reportFooter        String?  @map("report_footer") @db.VarChar(2000)
+  currency            String   @default("CDF") @db.VarChar(3)
+  timezone            String   @default("Africa/Kinshasa") @db.VarChar(64)
+  /// Prélèvement autorisé seulement après paiement complet (sauf demande urgente).
+  requirePaymentBeforeCollection Boolean @default(false) @map("require_payment_before_collection")
+  /// Caisse bi-devise CDF/USD (devise de base = currency, l'autre au taux du jour).
+  secondaryCurrencyEnabled       Boolean @default(false) @map("secondary_currency_enabled")
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedById         String?  @map("updated_by_id") @db.Uuid
+
+  @@map("lab_settings")
+}
+
+// =====================================================================
+// Étape 2 — Référentiels : patients, prescripteurs, catalogue
+// =====================================================================
+
+enum Sex {
+  MALE
+  FEMALE
+  UNKNOWN
+}
+
+enum RangeSex {
+  ANY
+  MALE
+  FEMALE
+}
+
+enum ResultType {
+  NUMERIC
+  TEXT
+  CHOICE
+}
+
+model Patient {
+  id                 String    @id @default(uuid()) @db.Uuid
+  /// Identifiant patient unique attribué par la base (PAT-000001).
+  code               String    @unique @default(dbgenerated("('PAT-'::text || lpad((nextval('patient_code_seq'::regclass))::text, 6, '0'::text))")) @db.VarChar(20)
+  lastName           String    @map("last_name") @db.VarChar(80)
+  middleName         String?   @map("middle_name") @db.VarChar(80)
+  firstName          String?   @map("first_name") @db.VarChar(80)
+  /// Jetons du nom normalisés et triés (recherche et détection des doublons).
+  searchName         String    @map("search_name") @db.VarChar(300)
+  sex                Sex
+  birthDate          DateTime? @map("birth_date") @db.Date
+  birthDateEstimated Boolean   @default(false) @map("birth_date_estimated")
+  phone              String?   @db.VarChar(30)
+  /// 9 derniers chiffres du téléphone (comparaison indépendante du format).
+  phoneKey           String?   @map("phone_key") @db.VarChar(9)
+  email              String?   @db.VarChar(254)
+  address            String?   @db.VarChar(300)
+  city               String?   @db.VarChar(100)
+  externalId         String?   @map("external_id") @db.VarChar(50)
+  notes              String?   @db.VarChar(1000)
+  isActive           Boolean   @default(true) @map("is_active")
+  deactivatedAt      DateTime? @map("deactivated_at") @db.Timestamptz(6)
+  deactivatedById    String?   @map("deactivated_by_id") @db.Uuid
+  deactivationReason String?   @map("deactivation_reason") @db.VarChar(500)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdById        String?   @map("created_by_id") @db.Uuid
+  updatedById        String?   @map("updated_by_id") @db.Uuid
+
+  orders   LabOrder[]
+  invoices Invoice[]
+
+  @@index([searchName(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([phoneKey])
+  @@index([externalId])
+  @@index([createdAt])
+  @@map("patients")
+}
+
+model Prescriber {
+  id                 String    @id @default(uuid()) @db.Uuid
+  title              String?   @db.VarChar(20)
+  lastName           String    @map("last_name") @db.VarChar(80)
+  firstName          String?   @map("first_name") @db.VarChar(80)
+  searchName         String    @map("search_name") @db.VarChar(300)
+  specialty          String?   @db.VarChar(100)
+  facility           String?   @db.VarChar(150)
+  phone              String?   @db.VarChar(30)
+  email              String?   @db.VarChar(254)
+  licenseNumber      String?   @unique @map("license_number") @db.VarChar(50)
+  isActive           Boolean   @default(true) @map("is_active")
+  deactivationReason String?   @map("deactivation_reason") @db.VarChar(500)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  orders LabOrder[]
+
+  @@index([searchName(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@map("prescribers")
+}
+
+model LabSection {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique @db.VarChar(20)
+  name         String   @db.VarChar(100)
+  displayOrder Int      @default(0) @map("display_order")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  exams Exam[]
+  qcMaterials QcMaterial[]
+  instruments Instrument[]
+
+  @@map("lab_sections")
+}
+
+model SampleType {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique @db.VarChar(20)
+  name         String   @db.VarChar(100)
+  container    String?  @db.VarChar(100)
+  instructions String?  @db.VarChar(500)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  exams   Exam[]
+  samples Sample[]
+
+  @@map("sample_types")
+}
+
+model Exam {
+  id                  String   @id @default(uuid()) @db.Uuid
+  code                String   @unique @db.VarChar(20)
+  name                String   @db.VarChar(150)
+  shortName           String?  @map("short_name") @db.VarChar(30)
+  sectionId           String   @map("section_id") @db.Uuid
+  sampleTypeId        String   @map("sample_type_id") @db.Uuid
+  price               Decimal  @db.Decimal(12, 2)
+  turnaroundHours     Int      @map("turnaround_hours")
+  patientInstructions String?  @map("patient_instructions") @db.VarChar(500)
+  displayOrder        Int      @default(0) @map("display_order")
+  isActive            Boolean  @default(true) @map("is_active")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  section    LabSection      @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  sampleType SampleType      @relation(fields: [sampleTypeId], references: [id], onDelete: Restrict)
+  parameters ExamParameter[]
+  orderItems OrderItem[]
+
+  @@index([sectionId])
+  @@index([sampleTypeId])
+  @@map("exams")
+}
+
+model ExamParameter {
+  id           String     @id @default(uuid()) @db.Uuid
+  examId       String     @map("exam_id") @db.Uuid
+  code         String     @db.VarChar(30)
+  name         String     @db.VarChar(150)
+  resultType   ResultType @map("result_type")
+  unit         String?    @db.VarChar(30)
+  decimals     Int?
+  choices      String[]
+  displayOrder Int        @default(0) @map("display_order")
+  isActive     Boolean    @default(true) @map("is_active")
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  exam            Exam             @relation(fields: [examId], references: [id], onDelete: Restrict)
+  referenceRanges ReferenceRange[]
+  results         TestResult[]
+  qcTargets       QcTarget[]
+  qcRuns          QcRun[]
+  instrumentMappings InstrumentTestMapping[]
+  dhis2Mappings      Dhis2Mapping[]
+  vlsmMappings       VlsmMapping[]
+
+  @@unique([examId, code])
+  @@map("exam_parameters")
+}
+
+model ReferenceRange {
+  id           String   @id @default(uuid()) @db.Uuid
+  parameterId  String   @map("parameter_id") @db.Uuid
+  sex          RangeSex @default(ANY)
+  /// Tranche d'âge [ageMinDays, ageMaxDays[ en jours ; ageMaxDays null = sans limite.
+  ageMinDays   Int      @default(0) @map("age_min_days")
+  ageMaxDays   Int?     @map("age_max_days")
+  low          Decimal? @db.Decimal(14, 4)
+  high         Decimal? @db.Decimal(14, 4)
+  criticalLow  Decimal? @map("critical_low") @db.Decimal(14, 4)
+  criticalHigh Decimal? @map("critical_high") @db.Decimal(14, 4)
+  normalText   String?  @map("normal_text") @db.VarChar(100)
+  comment      String?  @db.VarChar(300)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  parameter ExamParameter @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+
+  @@index([parameterId])
+  @@map("reference_ranges")
+}
+
+// =====================================================================
+// Étape 3 — Demandes, échantillons, facturation, caisse
+// =====================================================================
+
+enum OrderPriority {
+  ROUTINE
+  URGENT
+}
+
+enum OrderStatus {
+  REGISTERED
+  PARTIALLY_COLLECTED
+  COLLECTED
+  RECEIVED
+  CANCELLED
+  PARTIALLY_VALIDATED
+  VALIDATED
+}
+
+enum SampleStatus {
+  PENDING_COLLECTION
+  COLLECTED
+  RECEIVED
+  REJECTED
+}
+
+enum NonConformityType {
+  HEMOLYZED
+  CLOTTED
+  INSUFFICIENT_VOLUME
+  WRONG_CONTAINER
+  IDENTIFICATION_ERROR
+  TRANSPORT_DELAY
+  TEMPERATURE
+  LEAKED
+  CONTAMINATED
+  OTHER
+}
+
+enum NonConformityDecision {
+  REJECTED
+  ACCEPTED_WITH_RESERVATION
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  MOBILE_MONEY
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+/// Compteurs de numérotation sans trou (demandes, échantillons, factures, reçus, sessions).
+/// L'incrément est transactionnel : une transaction annulée ne consomme pas de numéro.
+model Counter {
+  key    String @db.VarChar(20)
+  period String @db.VarChar(10)
+  value  Int
+
+  @@id([key, period])
+  @@map("counters")
+}
+
+model LabOrder {
+  id                 String        @id @default(uuid()) @db.Uuid
+  number             String        @unique @db.VarChar(20)
+  patientId          String        @map("patient_id") @db.Uuid
+  prescriberId       String?       @map("prescriber_id") @db.Uuid
+  priority           OrderPriority @default(ROUTINE)
+  status             OrderStatus   @default(REGISTERED)
+  clinicalInfo       String?       @map("clinical_info") @db.VarChar(1000)
+  createdById        String        @map("created_by_id") @db.Uuid
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz(6)
+  cancelledById      String?       @map("cancelled_by_id") @db.Uuid
+  cancellationReason String?       @map("cancellation_reason") @db.VarChar(500)
+
+  patient    Patient     @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  prescriber Prescriber? @relation(fields: [prescriberId], references: [id], onDelete: Restrict)
+  items      OrderItem[]
+  samples    Sample[]
+  invoice    Invoice?
+  reports    Report[]
+  qualityIssues QualityIssue[]
+
+  @@index([patientId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("lab_orders")
+}
+
+model OrderItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  orderId   String   @map("order_id") @db.Uuid
+  examId    String   @map("exam_id") @db.Uuid
+  /// Instantané du catalogue au moment de la demande (le catalogue peut évoluer ensuite).
+  examCode  String   @map("exam_code") @db.VarChar(20)
+  examName  String   @map("exam_name") @db.VarChar(150)
+  unitPrice Decimal  @map("unit_price") @db.Decimal(12, 2)
+  sampleId  String   @map("sample_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Étape 4 : avancement analytique de l'examen.
+  analysisStatus         AnalysisStatus @default(AWAITING_SAMPLE) @map("analysis_status")
+  technicalValidatedAt   DateTime?      @map("technical_validated_at") @db.Timestamptz(6)
+  technicalValidatedById String?        @map("technical_validated_by_id") @db.Uuid
+  validatedAt            DateTime?      @map("validated_at") @db.Timestamptz(6)
+  validatedById          String?        @map("validated_by_id") @db.Uuid
+  /// Incrémenté à chaque correction après validation biologique.
+  version                Int            @default(1)
+  biologistComment       String?        @map("biologist_comment") @db.VarChar(1000)
+
+  order      LabOrder          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  exam       Exam              @relation(fields: [examId], references: [id], onDelete: Restrict)
+  sample     Sample            @relation(fields: [sampleId], references: [id], onDelete: Restrict)
+  results    TestResult[]
+  alerts     CriticalAlert[]
+  amendments ResultAmendment[]
+  vlsmSubmissions VlsmSubmission[]
+
+  @@unique([orderId, examId])
+  @@index([sampleId])
+  @@index([analysisStatus])
+  @@map("order_items")
+}
+
+model Sample {
+  id             String       @id @default(uuid()) @db.Uuid
+  /// N° d'échantillon imprimé en code-barres : AAMMJJ + n° du jour (2611220001).
+  number         String       @unique @db.VarChar(20)
+  orderId        String       @map("order_id") @db.Uuid
+  sampleTypeId   String       @map("sample_type_id") @db.Uuid
+  status         SampleStatus @default(PENDING_COLLECTION)
+  collectedAt    DateTime?    @map("collected_at") @db.Timestamptz(6)
+  collectedById  String?      @map("collected_by_id") @db.Uuid
+  receivedAt     DateTime?    @map("received_at") @db.Timestamptz(6)
+  receivedById   String?      @map("received_by_id") @db.Uuid
+  /// Accepté par dérogation malgré une non-conformité (réserve à reporter sur le compte rendu).
+  hasReservation Boolean      @default(false) @map("has_reservation")
+  rejectedAt     DateTime?    @map("rejected_at") @db.Timestamptz(6)
+  /// Échantillon refusé que celui-ci remplace (nouveau prélèvement).
+  replacesId     String?      @unique @map("replaces_id") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  order           LabOrder        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  sampleType      SampleType      @relation(fields: [sampleTypeId], references: [id], onDelete: Restrict)
+  replaces        Sample?         @relation("SampleReplacement", fields: [replacesId], references: [id], onDelete: Restrict)
+  replacedBy      Sample?         @relation("SampleReplacement")
+  items           OrderItem[]
+  nonConformities NonConformity[]
+  qualityIssues   QualityIssue[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("samples")
+}
+
+model NonConformity {
+  id           String                @id @default(uuid()) @db.Uuid
+  sampleId     String                @map("sample_id") @db.Uuid
+  type         NonConformityType
+  decision     NonConformityDecision
+  comment      String?               @db.VarChar(500)
+  recordedById String                @map("recorded_by_id") @db.Uuid
+  recordedAt   DateTime              @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  sample Sample @relation(fields: [sampleId], references: [id], onDelete: Restrict)
+
+  @@index([sampleId])
+  @@index([recordedAt])
+  @@map("non_conformities")
+}
+
+model Invoice {
+  id                 String        @id @default(uuid()) @db.Uuid
+  number             String        @unique @db.VarChar(20)
+  orderId            String        @unique @map("order_id") @db.Uuid
+  patientId          String        @map("patient_id") @db.Uuid
+  totalAmount        Decimal       @map("total_amount") @db.Decimal(12, 2)
+  discountAmount     Decimal       @default(0) @map("discount_amount") @db.Decimal(12, 2)
+  discountReason     String?       @map("discount_reason") @db.VarChar(500)
+  payerName          String?       @map("payer_name") @db.VarChar(150)
+  coveragePercent    Int           @default(0) @map("coverage_percent")
+  thirdPartyAmount   Decimal       @map("third_party_amount") @db.Decimal(12, 2)
+  patientAmount      Decimal       @map("patient_amount") @db.Decimal(12, 2)
+  paidAmount         Decimal       @default(0) @map("paid_amount") @db.Decimal(12, 2)
+  status             InvoiceStatus @default(UNPAID)
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz(6)
+  cancellationReason String?       @map("cancellation_reason") @db.VarChar(500)
+
+  order    LabOrder      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  patient  Patient       @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  lines    InvoiceLine[]
+  payments Payment[]
+
+  @@index([status])
+  @@index([patientId])
+  @@index([createdAt])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id          String  @id @default(uuid()) @db.Uuid
+  invoiceId   String  @map("invoice_id") @db.Uuid
+  orderItemId String? @unique @map("order_item_id") @db.Uuid
+  label       String  @db.VarChar(200)
+  amount      Decimal @db.Decimal(12, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+  @@map("invoice_lines")
+}
+
+model Payment {
+  id                 String        @id @default(uuid()) @db.Uuid
+  /// N° de reçu : REC-AAAA-000001
+  number             String        @unique @db.VarChar(20)
+  invoiceId          String        @map("invoice_id") @db.Uuid
+  cashSessionId      String        @map("cash_session_id") @db.Uuid
+  /// Montant imputé sur la facture, en devise de base.
+  amount             Decimal       @db.Decimal(12, 2)
+  /// Devise et montant remis par le patient.
+  currency           String        @db.VarChar(3)
+  tenderedAmount     Decimal       @map("tendered_amount") @db.Decimal(12, 2)
+  /// Taux appliqué (CDF pour 1 USD), figé au moment du paiement ; null si devise de base.
+  exchangeRate       Decimal?      @map("exchange_rate") @db.Decimal(14, 4)
+  /// Monnaie rendue, en devise de base.
+  changeAmount       Decimal       @default(0) @map("change_amount") @db.Decimal(12, 2)
+  method             PaymentMethod
+  reference          String?       @db.VarChar(100)
+  receivedById       String        @map("received_by_id") @db.Uuid
+  receivedAt         DateTime      @default(now()) @map("received_at") @db.Timestamptz(6)
+  cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz(6)
+  cancelledById      String?       @map("cancelled_by_id") @db.Uuid
+  cancellationReason String?       @map("cancellation_reason") @db.VarChar(500)
+
+  invoice     Invoice     @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  cashSession CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+  @@index([cashSessionId])
+  @@index([receivedAt])
+  @@map("payments")
+}
+
+model CashSession {
+  id           String            @id @default(uuid()) @db.Uuid
+  number       String            @unique @db.VarChar(20)
+  cashierId    String            @map("cashier_id") @db.Uuid
+  status       CashSessionStatus @default(OPEN)
+  openedAt     DateTime          @default(now()) @map("opened_at") @db.Timestamptz(6)
+  /// Devises figées à l'ouverture (le paramétrage peut changer ensuite).
+  baseCurrency String            @default("CDF") @map("base_currency") @db.VarChar(3)
+  secondaryCurrency String?      @map("secondary_currency") @db.VarChar(3)
+  openingFloat Decimal           @map("opening_float") @db.Decimal(12, 2)
+  openingFloatSecondary Decimal  @default(0) @map("opening_float_secondary") @db.Decimal(12, 2)
+  closedAt     DateTime?         @map("closed_at") @db.Timestamptz(6)
+  expectedCash Decimal?          @map("expected_cash") @db.Decimal(12, 2)
+  countedCash  Decimal?          @map("counted_cash") @db.Decimal(12, 2)
+  difference   Decimal?          @db.Decimal(12, 2)
+  expectedCashSecondary Decimal? @map("expected_cash_secondary") @db.Decimal(12, 2)
+  countedCashSecondary  Decimal? @map("counted_cash_secondary") @db.Decimal(12, 2)
+  differenceSecondary   Decimal? @map("difference_secondary") @db.Decimal(12, 2)
+  closingNote  String?           @map("closing_note") @db.VarChar(500)
+  /// Récapitulatif figé à la clôture (totaux par moyen de paiement).
+  summary      Json?
+
+  payments Payment[]
+
+  @@index([cashierId, status])
+  @@index([openedAt])
+  @@map("cash_sessions")
+}
+
+// =====================================================================
+// Bi-devise : taux de change journalier
+// =====================================================================
+
+/// Taux du jour (CDF pour 1 USD), un par date locale du laboratoire. Modifications auditées ;
+/// chaque paiement fige le taux appliqué.
+model ExchangeRate {
+  id            String   @id @default(uuid()) @db.Uuid
+  effectiveDate DateTime @unique @map("effective_date") @db.Date
+  cdfPerUsd     Decimal  @map("cdf_per_usd") @db.Decimal(14, 4)
+  note          String?  @db.VarChar(300)
+  setById       String   @map("set_by_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("exchange_rates")
+}
+
+// =====================================================================
+// Étape 4 — Résultats, validation, comptes rendus
+// =====================================================================
+
+enum AnalysisStatus {
+  AWAITING_SAMPLE
+  TO_ENTER
+  ENTERED
+  TECHNICAL_VALIDATED
+  VALIDATED
+}
+
+enum ResultFlag {
+  CRITICAL_LOW
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL_HIGH
+  ABNORMAL
+}
+
+enum ReportKind {
+  PARTIAL
+  FINAL
+  AMENDED
+}
+
+/// Un résultat par (examen demandé × paramètre). Paramètre et valeur de référence sont figés
+/// à la création (le catalogue peut évoluer sans modifier les résultats existants).
+model TestResult {
+  id            String      @id @default(uuid()) @db.Uuid
+  orderItemId   String      @map("order_item_id") @db.Uuid
+  parameterId   String      @map("parameter_id") @db.Uuid
+  parameterCode String      @map("parameter_code") @db.VarChar(30)
+  parameterName String      @map("parameter_name") @db.VarChar(150)
+  unit          String?     @db.VarChar(30)
+  resultType    ResultType  @map("result_type")
+  decimals      Int?
+  choices       String[]
+  displayOrder  Int         @default(0) @map("display_order")
+  numericValue  Decimal?    @map("numeric_value") @db.Decimal(18, 4)
+  /// « < » ou « > » : limite de détection / quantification.
+  qualifier     String?     @db.VarChar(1)
+  textValue     String?     @map("text_value") @db.VarChar(500)
+  flag          ResultFlag?
+  hasReference  Boolean     @default(false) @map("has_reference")
+  refLow        Decimal?    @map("ref_low") @db.Decimal(14, 4)
+  refHigh       Decimal?    @map("ref_high") @db.Decimal(14, 4)
+  refCriticalLow  Decimal?  @map("ref_critical_low") @db.Decimal(14, 4)
+  refCriticalHigh Decimal?  @map("ref_critical_high") @db.Decimal(14, 4)
+  refNormalText String?     @map("ref_normal_text") @db.VarChar(100)
+  refComment    String?     @map("ref_comment") @db.VarChar(300)
+  refLabel      String?     @map("ref_label") @db.VarChar(100)
+  comment       String?     @db.VarChar(500)
+  enteredById   String?     @map("entered_by_id") @db.Uuid
+  enteredAt     DateTime?   @map("entered_at") @db.Timestamptz(6)
+  /// Origine de la valeur : saisie manuelle ou automate (et lequel).
+  source       ResultSource @default(MANUAL)
+  instrumentId String?      @map("instrument_id") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  orderItem OrderItem       @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  parameter ExamParameter   @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+  alerts    CriticalAlert[]
+
+  @@unique([orderItemId, parameterId])
+  @@index([parameterId])
+  @@map("test_results")
+}
+
+/// Résultat critique : sa communication (qui, quand, à qui) doit être tracée avant validation (ISO 15189 §7.4.1.3).
+model CriticalAlert {
+  id               String     @id @default(uuid()) @db.Uuid
+  resultId         String     @map("result_id") @db.Uuid
+  orderItemId      String     @map("order_item_id") @db.Uuid
+  flag             ResultFlag
+  valueText        String     @map("value_text") @db.VarChar(60)
+  detectedAt       DateTime   @default(now()) @map("detected_at") @db.Timestamptz(6)
+  detectedById     String     @map("detected_by_id") @db.Uuid
+  acknowledgedAt   DateTime?  @map("acknowledged_at") @db.Timestamptz(6)
+  acknowledgedById String?    @map("acknowledged_by_id") @db.Uuid
+  notifiedTo       String?    @map("notified_to") @db.VarChar(200)
+  note             String?    @db.VarChar(500)
+  /// Alerte devenue sans objet (valeur corrigée avant communication).
+  cancelledAt      DateTime?  @map("cancelled_at") @db.Timestamptz(6)
+
+  result    TestResult @relation(fields: [resultId], references: [id], onDelete: Restrict)
+  orderItem OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@index([orderItemId])
+  @@index([acknowledgedAt])
+  @@map("critical_alerts")
+}
+
+/// Trace d'une correction après validation biologique : valeurs remplacées et motif.
+model ResultAmendment {
+  id              String   @id @default(uuid()) @db.Uuid
+  orderItemId     String   @map("order_item_id") @db.Uuid
+  fromVersion     Int      @map("from_version")
+  previousResults Json     @map("previous_results")
+  reason          String   @db.VarChar(500)
+  amendedById     String   @map("amended_by_id") @db.Uuid
+  amendedAt       DateTime @default(now()) @map("amended_at") @db.Timestamptz(6)
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@index([orderItemId])
+  @@map("result_amendments")
+}
+
+/// Compte rendu émis : PDF figé, empreinte SHA-256, non modifiable (trigger). Archivage ISO 15189 §7.4.1.7 / §8.4.
+model Report {
+  id           String     @id @default(uuid()) @db.Uuid
+  /// CR-2026-000001
+  number       String     @unique @db.VarChar(20)
+  orderId      String     @map("order_id") @db.Uuid
+  version      Int
+  kind         ReportKind
+  sha256       String     @db.VarChar(64)
+  pdf          Bytes
+  orderItemIds String[]   @map("order_item_ids")
+  examCodes    String[]   @map("exam_codes")
+  issuedAt     DateTime   @default(now()) @map("issued_at") @db.Timestamptz(6)
+  issuedById   String     @map("issued_by_id") @db.Uuid
+  supersedesId String?    @unique @map("supersedes_id") @db.Uuid
+
+  order      LabOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  supersedes Report?  @relation("ReportSupersession", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy Report? @relation("ReportSupersession")
+
+  @@unique([orderId, version])
+  @@map("reports")
+}
+
+// =====================================================================
+// Étape 5 — Qualité : contrôle qualité interne, non-conformités
+// =====================================================================
+
+enum QcStatus {
+  ACCEPTED
+  WARNING
+  REJECTED
+}
+
+enum QcTargetSource {
+  MANUFACTURER
+  LABORATORY
+}
+
+enum QualityIssueCategory {
+  PRE_ANALYTICAL
+  ANALYTICAL
+  POST_ANALYTICAL
+  EQUIPMENT
+  REAGENT
+  COMPLAINT
+  SAFETY
+  OTHER
+}
+
+enum QualityIssueSeverity {
+  MINOR
+  MAJOR
+  CRITICAL
+}
+
+enum QualityIssueStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+  CANCELLED
+}
+
+/// Lot de matériau de contrôle (un niveau).
+model QcMaterial {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(150)
+  manufacturer String?  @db.VarChar(150)
+  lotNumber    String   @map("lot_number") @db.VarChar(60)
+  level        String   @db.VarChar(40)
+  expiresOn    DateTime @map("expires_on") @db.Date
+  sectionId    String?  @map("section_id") @db.Uuid
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  section LabSection? @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  targets QcTarget[]
+  instrumentLinks InstrumentQcMaterial[]
+
+  @@unique([name, lotNumber, level])
+  @@map("qc_materials")
+}
+
+/// Valeur cible (moyenne, écart-type) d'un matériau pour un paramètre.
+model QcTarget {
+  id          String         @id @default(uuid()) @db.Uuid
+  materialId  String         @map("material_id") @db.Uuid
+  parameterId String         @map("parameter_id") @db.Uuid
+  mean        Decimal        @db.Decimal(14, 4)
+  sd          Decimal        @db.Decimal(14, 4)
+  source      QcTargetSource
+  isActive    Boolean        @default(true) @map("is_active")
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  material  QcMaterial    @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  parameter ExamParameter @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+  results   QcResult[]
+
+  @@unique([materialId, parameterId])
+  @@index([parameterId])
+  @@map("qc_targets")
+}
+
+/// Série de contrôle d'un paramètre (un résultat par niveau), évaluée par les règles de Westgard.
+model QcRun {
+  id               String    @id @default(uuid()) @db.Uuid
+  parameterId      String    @map("parameter_id") @db.Uuid
+  performedAt      DateTime  @map("performed_at") @db.Timestamptz(6)
+  performedById    String    @map("performed_by_id") @db.Uuid
+  status           QcStatus
+  violatedRules    String[]  @map("violated_rules")
+  comment          String?   @db.VarChar(500)
+  correctiveAction String?   @map("corrective_action") @db.VarChar(1000)
+  resolvedAt       DateTime? @map("resolved_at") @db.Timestamptz(6)
+  resolvedById     String?   @map("resolved_by_id") @db.Uuid
+  /// Série écartée des statistiques et de l'évaluation des séries suivantes (erreur de saisie, mauvais lot…).
+  excludedAt       DateTime? @map("excluded_at") @db.Timestamptz(6)
+  excludedById     String?   @map("excluded_by_id") @db.Uuid
+  excludedReason   String?   @map("excluded_reason") @db.VarChar(500)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  parameter    ExamParameter @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+  results      QcResult[]
+  qualityIssue QualityIssue?
+
+  @@index([parameterId, performedAt])
+  @@index([status])
+  @@map("qc_runs")
+}
+
+model QcResult {
+  id            String   @id @default(uuid()) @db.Uuid
+  runId         String   @map("run_id") @db.Uuid
+  targetId      String   @map("target_id") @db.Uuid
+  value         Decimal  @db.Decimal(18, 4)
+  /// Cible figée au moment du passage
+  mean          Decimal  @db.Decimal(14, 4)
+  sd            Decimal  @db.Decimal(14, 4)
+  zScore        Decimal  @map("z_score") @db.Decimal(9, 3)
+  status        QcStatus
+  violatedRules String[] @map("violated_rules")
+
+  run    QcRun    @relation(fields: [runId], references: [id], onDelete: Restrict)
+  target QcTarget @relation(fields: [targetId], references: [id], onDelete: Restrict)
+
+  @@unique([runId, targetId])
+  @@index([targetId])
+  @@map("qc_results")
+}
+
+/// Fiche de non-conformité (ISO 15189 §7.5) et actions correctives (§8.7).
+model QualityIssue {
+  id                 String               @id @default(uuid()) @db.Uuid
+  /// NC-2026-0001
+  number             String               @unique @db.VarChar(20)
+  title              String               @db.VarChar(200)
+  category           QualityIssueCategory
+  severity           QualityIssueSeverity
+  status             QualityIssueStatus   @default(OPEN)
+  description        String               @db.VarChar(4000)
+  detectedAt         DateTime             @map("detected_at") @db.Timestamptz(6)
+  declaredAt         DateTime             @default(now()) @map("declared_at") @db.Timestamptz(6)
+  declaredById       String               @map("declared_by_id") @db.Uuid
+  immediateAction    String?              @map("immediate_action") @db.VarChar(2000)
+  orderId            String?              @map("order_id") @db.Uuid
+  sampleId           String?              @map("sample_id") @db.Uuid
+  qcRunId            String?              @unique @map("qc_run_id") @db.Uuid
+  rootCause          String?              @map("root_cause") @db.VarChar(2000)
+  correctiveAction   String?              @map("corrective_action") @db.VarChar(2000)
+  actionOwner        String?              @map("action_owner") @db.VarChar(150)
+  actionDueDate      DateTime?            @map("action_due_date") @db.Date
+  analyzedById       String?              @map("analyzed_by_id") @db.Uuid
+  analyzedAt         DateTime?            @map("analyzed_at") @db.Timestamptz(6)
+  effectivenessCheck String?              @map("effectiveness_check") @db.VarChar(2000)
+  closedById         String?              @map("closed_by_id") @db.Uuid
+  closedAt           DateTime?            @map("closed_at") @db.Timestamptz(6)
+  cancelledReason    String?              @map("cancelled_reason") @db.VarChar(500)
+  updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  order  LabOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  sample Sample?   @relation(fields: [sampleId], references: [id], onDelete: Restrict)
+  qcRun  QcRun?    @relation(fields: [qcRunId], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([declaredAt])
+  @@map("quality_issues")
+}
+
+// =====================================================================
+// Étape 6 — Interfaçage des automates
+// =====================================================================
+
+enum InstrumentProtocol {
+  ASTM
+  HL7
+  CSV
+}
+
+enum InstrumentMessageStatus {
+  PROCESSED
+  PARTIAL
+  FAILED
+}
+
+enum InstrumentMessageSource {
+  GATEWAY
+  UPLOAD
+}
+
+enum InstrumentResultKind {
+  PATIENT
+  QC
+}
+
+enum InstrumentResultStatus {
+  APPLIED
+  QC_APPLIED
+  CONFLICT
+  UNMATCHED
+  LOCKED
+  NOT_PERFORMED
+  DISMISSED
+}
+
+enum ResultSource {
+  MANUAL
+  INSTRUMENT
+}
+
+model Instrument {
+  id               String             @id @default(uuid()) @db.Uuid
+  code             String             @unique @db.VarChar(30)
+  name             String             @db.VarChar(120)
+  manufacturer     String?            @db.VarChar(120)
+  model            String?            @db.VarChar(120)
+  sectionId        String?            @map("section_id") @db.Uuid
+  protocol         InstrumentProtocol
+  csvConfig        Json?              @map("csv_config")
+  isActive         Boolean            @default(true) @map("is_active")
+  /// Compte de service (sans rôle, non connectable) qui porte les actions de l'automate dans l'audit.
+  serviceUserId    String             @unique @map("service_user_id") @db.Uuid
+  /// Empreinte SHA-256 de la clé d'API (la clé elle-même n'est jamais stockée).
+  apiKeyHash       String?            @unique @map("api_key_hash") @db.VarChar(64)
+  apiKeyPrefix     String?            @map("api_key_prefix") @db.VarChar(48)
+  apiKeyRotatedAt  DateTime?          @map("api_key_rotated_at") @db.Timestamptz(6)
+  lastMessageAt    DateTime?          @map("last_message_at") @db.Timestamptz(6)
+  createdAt        DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  section     LabSection?             @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+  serviceUser User                    @relation(fields: [serviceUserId], references: [id], onDelete: Restrict)
+  mappings    InstrumentTestMapping[]
+  qcMaterials InstrumentQcMaterial[]
+  messages    InstrumentMessage[]
+  results     InstrumentResult[]
+
+  @@map("instruments")
+}
+
+model InstrumentTestMapping {
+  id             String   @id @default(uuid()) @db.Uuid
+  instrumentId   String   @map("instrument_id") @db.Uuid
+  instrumentCode String   @map("instrument_code") @db.VarChar(40)
+  parameterId    String   @map("parameter_id") @db.Uuid
+  factor         Decimal  @default(1) @db.Decimal(14, 6)
+  valueMap       Json     @default("{}") @map("value_map")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  instrument Instrument    @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+  parameter  ExamParameter @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+
+  @@unique([instrumentId, instrumentCode])
+  @@map("instrument_test_mappings")
+}
+
+model InstrumentQcMaterial {
+  id           String   @id @default(uuid()) @db.Uuid
+  instrumentId String   @map("instrument_id") @db.Uuid
+  specimenId   String   @map("specimen_id") @db.VarChar(60)
+  materialId   String   @map("material_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+  material   QcMaterial @relation(fields: [materialId], references: [id], onDelete: Restrict)
+
+  @@unique([instrumentId, specimenId])
+  @@map("instrument_qc_materials")
+}
+
+/// Message brut reçu, conservé à l'identique (traçabilité) ; une retransmission identique est reconnue par son empreinte.
+model InstrumentMessage {
+  id           String                  @id @default(uuid()) @db.Uuid
+  instrumentId String                  @map("instrument_id") @db.Uuid
+  protocol     InstrumentProtocol
+  source       InstrumentMessageSource
+  filename     String?                 @db.VarChar(200)
+  raw          String
+  sha256       String                  @db.VarChar(64)
+  receivedAt   DateTime                @default(now()) @map("received_at") @db.Timestamptz(6)
+  receivedById String                  @map("received_by_id") @db.Uuid
+  status       InstrumentMessageStatus
+  error        String?                 @db.VarChar(1000)
+  warnings     String[]
+  resultCount  Int                     @default(0) @map("result_count")
+  appliedCount Int                     @default(0) @map("applied_count")
+
+  instrument Instrument         @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+  results    InstrumentResult[]
+
+  @@unique([instrumentId, sha256])
+  @@index([receivedAt])
+  @@map("instrument_messages")
+}
+
+model InstrumentResult {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  messageId          String                 @map("message_id") @db.Uuid
+  instrumentId       String                 @map("instrument_id") @db.Uuid
+  kind               InstrumentResultKind
+  specimenId         String                 @map("specimen_id") @db.VarChar(60)
+  instrumentTestCode String                 @map("instrument_test_code") @db.VarChar(40)
+  rawValue           String                 @map("raw_value") @db.VarChar(100)
+  unit               String?                @db.VarChar(30)
+  flags              String?                @db.VarChar(20)
+  measuredAt         DateTime?              @map("measured_at") @db.Timestamptz(6)
+  status             InstrumentResultStatus
+  reason             String?                @db.VarChar(300)
+  parameterId        String?                @map("parameter_id") @db.Uuid
+  testResultId       String?                @map("test_result_id") @db.Uuid
+  qcRunId            String?                @map("qc_run_id") @db.Uuid
+  resolvedById       String?                @map("resolved_by_id") @db.Uuid
+  resolvedAt         DateTime?              @map("resolved_at") @db.Timestamptz(6)
+  createdAt          DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  message    InstrumentMessage @relation(fields: [messageId], references: [id], onDelete: Restrict)
+  instrument Instrument        @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+
+  @@index([messageId])
+  @@index([status])
+  @@index([specimenId])
+  @@map("instrument_results")
+}
+
+// =====================================================================
+// Étape 7 — Interopérabilité : DHIS2 (agrégats), VLSM/InteLIS (résultats CV/EID), OpenHIM
+// =====================================================================
+
+enum InteropSystem {
+  DHIS2
+  VLSM
+}
+
+enum InteropTransport {
+  DIRECT
+  OPENHIM
+}
+
+enum InteropAuthMode {
+  BASIC
+  TOKEN
+}
+
+enum Dhis2Measure {
+  VALIDATED_COUNT
+  NUMERIC_BELOW
+  NUMERIC_AT_OR_ABOVE
+  TEXT_EQUALS
+}
+
+enum VlsmTestType {
+  VL
+  EID
+}
+
+enum InteropRunKind {
+  CONNECTION_TEST
+  DHIS2_DRY_RUN
+  DHIS2_SEND
+  VLSM_SEND
+}
+
+enum InteropRunStatus {
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+enum VlsmSubmissionStatus {
+  SENT
+  FAILED
+}
+
+/// Système distant (DHIS2 ou VLSM), joint directement ou au travers d'un canal OpenHIM.
+model InteropEndpoint {
+  id              String           @id @default(uuid()) @db.Uuid
+  code            String           @unique @db.VarChar(30)
+  name            String           @db.VarChar(120)
+  system          InteropSystem
+  transport       InteropTransport
+  baseUrl         String           @map("base_url") @db.VarChar(500)
+  authMode        InteropAuthMode  @map("auth_mode")
+  username        String?          @db.VarChar(120)
+  /// Secret chiffré (AES-256-GCM, clé INTEROP_SECRET_KEY) : jamais renvoyé par l'API.
+  secretCipher    String?          @map("secret_cipher")
+  timeoutSeconds  Int              @default(30) @map("timeout_seconds")
+  isActive        Boolean          @default(true) @map("is_active")
+  settings        Json
+  lastTestAt      DateTime?        @map("last_test_at") @db.Timestamptz(6)
+  lastTestOk      Boolean?         @map("last_test_ok")
+  lastTestMessage String?          @map("last_test_message") @db.VarChar(500)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dhis2Mappings Dhis2Mapping[]
+  vlsmMappings  VlsmMapping[]
+  runs          InteropRun[]
+  submissions   VlsmSubmission[]
+
+  @@map("interop_endpoints")
+}
+
+/// Règle de calcul d'une valeur DHIS2 (élément de données × combinaison de catégories) à partir des résultats validés.
+model Dhis2Mapping {
+  id                  String       @id @default(uuid()) @db.Uuid
+  endpointId          String       @map("endpoint_id") @db.Uuid
+  label               String       @db.VarChar(150)
+  parameterId         String       @map("parameter_id") @db.Uuid
+  measure             Dhis2Measure
+  threshold           Decimal?     @db.Decimal(18, 4)
+  textMatch           String?      @map("text_match") @db.VarChar(100)
+  sex                 RangeSex     @default(ANY)
+  ageMinYears         Int?         @map("age_min_years")
+  ageMaxYears         Int?         @map("age_max_years")
+  dataElement         String       @map("data_element") @db.VarChar(11)
+  categoryOptionCombo String?      @map("category_option_combo") @db.VarChar(11)
+  displayOrder        Int          @default(0) @map("display_order")
+  isActive            Boolean      @default(true) @map("is_active")
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  endpoint  InteropEndpoint @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+  parameter ExamParameter   @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+
+  @@index([endpointId])
+  @@map("dhis2_mappings")
+}
+
+/// Paramètre du catalogue transmis à VLSM comme résultat de charge virale (VL) ou de diagnostic précoce (EID).
+model VlsmMapping {
+  id               String       @id @default(uuid()) @db.Uuid
+  endpointId       String       @map("endpoint_id") @db.Uuid
+  parameterId      String       @map("parameter_id") @db.Uuid
+  testType         VlsmTestType @map("test_type")
+  eidPositive      String?      @map("eid_positive") @db.VarChar(100)
+  eidNegative      String?      @map("eid_negative") @db.VarChar(100)
+  eidIndeterminate String?      @map("eid_indeterminate") @db.VarChar(100)
+  isActive         Boolean      @default(true) @map("is_active")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  endpoint  InteropEndpoint @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+  parameter ExamParameter   @relation(fields: [parameterId], references: [id], onDelete: Restrict)
+
+  @@unique([endpointId, parameterId])
+  @@map("vlsm_mappings")
+}
+
+/// Journal immuable des échanges (test, simulation, envoi) : charge utile, empreinte et réponse du système distant.
+model InteropRun {
+  id                   String           @id @default(uuid()) @db.Uuid
+  endpointId           String           @map("endpoint_id") @db.Uuid
+  kind                 InteropRunKind
+  status               InteropRunStatus
+  period               String?          @db.VarChar(6)
+  itemCount            Int              @default(0) @map("item_count")
+  payload              Json?
+  payloadSha256        String?          @map("payload_sha256") @db.VarChar(64)
+  httpStatus           Int?             @map("http_status")
+  openhimTransactionId String?          @map("openhim_transaction_id") @db.VarChar(100)
+  imported             Int?
+  updated              Int?
+  ignored              Int?
+  deleted              Int?
+  conflicts            Json?
+  message              String?          @db.VarChar(1000)
+  durationMs           Int              @default(0) @map("duration_ms")
+  triggeredById        String?          @map("triggered_by_id") @db.Uuid
+  createdAt            DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint    InteropEndpoint  @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+  submissions VlsmSubmission[]
+
+  @@index([endpointId, createdAt])
+  @@index([kind, period])
+  @@map("interop_runs")
+}
+
+/// Envoi d'un résultat validé (à une version donnée de l'examen) vers VLSM.
+model VlsmSubmission {
+  id               String               @id @default(uuid()) @db.Uuid
+  endpointId       String               @map("endpoint_id") @db.Uuid
+  runId            String               @map("run_id") @db.Uuid
+  orderItemId      String               @map("order_item_id") @db.Uuid
+  itemVersion      Int                  @map("item_version")
+  status           VlsmSubmissionStatus
+  uniqueId         String               @map("unique_id") @db.VarChar(64)
+  remoteSampleCode String?              @map("remote_sample_code") @db.VarChar(100)
+  message          String?              @db.VarChar(500)
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint  InteropEndpoint @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+  run       InteropRun      @relation(fields: [runId], references: [id], onDelete: Restrict)
+  orderItem OrderItem       @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@index([endpointId, orderItemId])
+  @@index([runId])
+  @@map("vlsm_submissions")
+}
