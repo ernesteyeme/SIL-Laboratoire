@@ -1,5 +1,6 @@
 # Publication d'une version : pousser une étiquette vX.Y.Z (identique à « version » de package.json).
 #   git tag v1.7.0 && git push origin v1.7.0
+# ou, depuis github.com : Releases → Draft a new release → étiquette v1.7.0 (créée sur main) → Publish.
 # Construit l'archive autonome (tests compris) et la publie dans GitHub Releases avec son empreinte et
 # latest.json : install.sh et « sudo lims update » y prennent la dernière version.
 name: Publication
@@ -45,6 +46,11 @@ jobs:
             echo
             echo "Empreinte SHA-256 : \`$(cut -d' ' -f1 dist-release/lims-${version}.tar.gz.sha256)\`"
           } > notes.md
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist-release/lims-${version}.tar.gz" "dist-release/lims-${version}.tar.gz.sha256" dist-release/latest.json \
-            --title "LIMS ${version}" --notes-file notes.md
+          files=("dist-release/lims-${version}.tar.gz" "dist-release/lims-${version}.tar.gz.sha256" dist-release/latest.json)
+          # Étiquette posée depuis la page « Releases » de GitHub : la publication existe déjà, on y joint les fichiers.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+            gh release edit "${GITHUB_REF_NAME}" --title "LIMS ${version}" --notes-file notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" "${files[@]}" --title "LIMS ${version}" --notes-file notes.md
+          fi
