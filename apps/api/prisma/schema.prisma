@@ -64,6 +64,8 @@ model User {
   refreshTokens RefreshToken[]
   instrument    Instrument?
 
+  sections UserSection[]
+
   @@map("users")
 }
 
@@ -239,6 +241,7 @@ model LabSection {
   exams Exam[]
   qcMaterials QcMaterial[]
   instruments Instrument[]
+  users       UserSection[]
 
   @@map("lab_sections")
 }
@@ -1274,4 +1277,23 @@ model VlsmSubmission {
   @@index([endpointId, orderItemId])
   @@index([runId])
   @@map("vlsm_submissions")
+}
+
+// =====================================================================
+// Version 1.8.0 — Habilitations par service (ISO 15189 §6.2)
+// =====================================================================
+
+/// Service (section) où un technicien ou un biologiste est habilité à saisir et valider.
+model UserSection {
+  userId      String   @map("user_id") @db.Uuid
+  sectionId   String   @map("section_id") @db.Uuid
+  grantedAt   DateTime @default(now()) @map("granted_at") @db.Timestamptz(6)
+  grantedById String?  @map("granted_by_id") @db.Uuid
+
+  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  section LabSection @relation(fields: [sectionId], references: [id], onDelete: Restrict)
+
+  @@id([userId, sectionId])
+  @@index([sectionId])
+  @@map("user_sections")
 }

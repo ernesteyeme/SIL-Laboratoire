@@ -8,6 +8,7 @@ import { SelectField, TextField } from '@/components/ui/Field';
 import { Alert, Badge, EmptyState, LoadingBlock } from '@/components/ui/feedback';
 import { Card, PageHeader } from '@/components/ui/PageHeader';
 import { Pagination } from '@/components/ui/Pagination';
+import { useAuth } from '@/auth/useAuth';
 import { sectionsQuery } from '@/features/catalog';
 import { useWorklist, type WorklistFilter, type WorklistStatus } from '@/features/results';
 import { cn, errorMessage, formatDateTime } from '@/lib/utils';
@@ -28,6 +29,7 @@ export function WorklistPage() {
   const [searchInput, setSearchInput] = useState('');
   const [filter, setFilter] = useState<WorklistFilter>({ page: 1, pageSize: 25, status, sectionId: sectionId || undefined, q: '' });
   const sections = useQuery(sectionsQuery);
+  const { allowedSectionIds } = useAuth();
 
   useEffect(() => {
     setFilter((f) => ({ ...f, status, sectionId: sectionId || undefined, page: 1 }));
@@ -72,9 +74,9 @@ export function WorklistPage() {
       <Card>
         <div className="flex flex-wrap items-end gap-3 border-b border-slate-200 p-4">
           <SelectField label="Paillasse (section)" value={sectionId} onChange={(e) => update({ section: e.target.value })} containerClassName="w-60">
-            <option value="">Toutes les sections</option>
+            <option value="">{allowedSectionIds ? 'Toutes mes sections' : 'Toutes les sections'}</option>
             {(sections.data ?? [])
-              .filter((s) => s.isActive)
+              .filter((s) => s.isActive && (allowedSectionIds === null || allowedSectionIds.includes(s.id)))
               .map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}

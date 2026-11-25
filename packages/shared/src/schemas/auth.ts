@@ -54,6 +54,8 @@ export interface AuthUser {
   fullName: string;
   email: string | null;
   roles: Role[];
+  /** Services où la personne est habilitée (paillasses, saisie, validations). */
+  sectionIds: string[];
   mustChangePassword: boolean;
 }
 

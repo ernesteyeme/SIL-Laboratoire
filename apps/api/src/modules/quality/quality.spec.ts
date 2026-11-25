@@ -3,6 +3,7 @@ import { Prisma } from '../../generated/prisma/client';
 import type { AuditService } from '../../core/audit/audit.service';
 import type { LabContextService } from '../../core/common/lab-context.service';
 import { zonedPeriod, zonedStartOfDay } from '../../core/common/time';
+import type { SectionAccessService } from '../../core/security/section-access.service';
 import type { RequestUser } from '../../core/context/request-context';
 import { DomainException } from '../../core/errors/domain.exception';
 import type { NumberingService } from '../../core/numbering/numbering.service';
@@ -114,7 +115,7 @@ const tx = {
   qualityIssue: { create: jest.fn(), update: jest.fn() },
   sample: { findUnique: jest.fn() },
   labOrder: { findUnique: jest.fn() },
-  examParameter: { findMany: jest.fn() },
+  examParameter: { findMany: jest.fn(), findUnique: jest.fn().mockResolvedValue({ exam: { section: { id: 'sec', name: 'Biochimie' } } }) },
 };
 const prisma = { $transaction: jest.fn((fn: (t: unknown) => unknown) => fn(tx)) } as unknown as PrismaService;
 const lab = {
@@ -148,7 +149,8 @@ const qcRepo = {
   latestRunsByParameter: jest.fn(),
 } as unknown as jest.Mocked<QcRepository>;
 const issuesService = { createFromQcRun: jest.fn() } as unknown as jest.Mocked<QualityIssuesService>;
-const qc = new QcService(prisma, qcRepo, issuesService, lab, audit);
+const sectionAccess = { assertCanAct: jest.fn().mockResolvedValue(undefined) } as unknown as SectionAccessService;
+const qc = new QcService(prisma, qcRepo, issuesService, lab, audit, sectionAccess);
 // Le détail renvoyé après création n'est pas l'objet de ces tests
 jest.spyOn(qc, 'getRun').mockResolvedValue({} as never);
 

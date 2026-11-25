@@ -51,7 +51,11 @@ export class SessionTokensService {
     const accessToken = await this.accessTokens.sign({ sub: user.id, username: user.username, ver: user.tokenVersion });
 
     return {
-      response: { accessToken, expiresIn: this.accessTokens.ttlSeconds, user: toAuthUser(user) },
+      response: {
+        accessToken,
+        expiresIn: this.accessTokens.ttlSeconds,
+        user: toAuthUser(user, (await db.userSection.findMany({ where: { userId: user.id }, select: { sectionId: true } })).map((s) => s.sectionId)),
+      },
       refreshToken: `${id}.${secret}`,
       refreshTokenId: id,
     };

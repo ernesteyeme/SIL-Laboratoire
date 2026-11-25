@@ -9,6 +9,12 @@ import type { UsersRepository } from './users.repository';
 import { UsersService } from './users.service';
 
 const ADMIN_ID = '11111111-1111-4111-8111-111111111111';
+const BIOCH = '33333333-3333-4333-8333-333333333333';
+const HEMATO = '44444444-4444-4444-8444-444444444444';
+const SECTIONS = [
+  { id: BIOCH, code: 'BIOCH', name: 'Biochimie', isActive: true },
+  { id: HEMATO, code: 'HEMATO', name: 'Hématologie', isActive: false },
+];
 const OTHER_ID = '22222222-2222-4222-8222-222222222222';
 
 function makeUser(overrides: Partial<User> = {}): User {
@@ -46,8 +52,16 @@ const actor: RequestUser = {
   mustChangePassword: false,
 };
 
-function setup(target: User | null, otherActiveAdmins = 1) {
-  const tx = { tx: true };
+function setup(target: User | null, otherActiveAdmins = 1, currentSections: string[] = []) {
+  const tx = {
+    tx: true,
+    labSection: { findMany: jest.fn(({ where }: { where: { id: { in: string[] } } }) => Promise.resolve(SECTIONS.filter((x) => where.id.in.includes(x.id)))) },
+    userSection: {
+      findMany: jest.fn(() =>
+        Promise.resolve(currentSections.map((id) => ({ sectionId: id, section: { code: SECTIONS.find((x) => x.id === id)!.code } }))),
+      ),
+    },
+  };
   const prisma = { $transaction: jest.fn((fn: (t: unknown) => unknown) => fn(tx)) } as unknown as PrismaService;
   const users = {
     findById: jest.fn().mockResolvedValue(target),
@@ -59,6 +73,8 @@ function setup(target: User | null, otherActiveAdmins = 1) {
     ),
     lockForUpdate: jest.fn().mockResolvedValue(undefined),
     countActiveAdmins: jest.fn().mockResolvedValue(otherActiveAdmins),
+    findWithSections: jest.fn((id: string) => Promise.resolve({ ...(target ?? makeUser({ id })), sections: [] })),
+    replaceSections: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<UsersRepository>;
   const sessions = { revokeAllForUser: jest.fn().mockResolvedValue(1) } as unknown as jest.Mocked<SessionsRepository>;
   const passwords = { hash: jest.fn().mockResolvedValue('argon-hash') } as unknown as jest.Mocked<PasswordService>;
@@ -78,7 +94,7 @@ describe('UsersService', () => {
   it('crée un utilisateur avec mot de passe haché, changement obligatoire et trace d’audit', async () => {
     const ctx = setup(null);
     await ctx.service.create(
-      { username: 'tech1', fullName: 'Tech Un', email: null, roles: ['TECHNICIEN'], temporaryPassword: 'Temp@12345!' },
+      { username: 'tech1', fullName: 'Tech Un', email: null, roles: ['TECHNICIEN'], sectionIds: [BIOCH], temporaryPassword: 'Temp@12345!' },
       actor,
     );
     expect(ctx.users.create).toHaveBeenCalledWith(
@@ -87,6 +103,8 @@ describe('UsersService', () => {
     );
     const auditCall = ctx.audit.record.mock.calls[0][1];
     expect(auditCall.action).toBe('CREATE');
+    expect(ctx.users.replaceSections).toHaveBeenCalledWith(OTHER_ID, [BIOCH], ADMIN_ID, ctx.tx);
+    expect(auditCall.after).toMatchObject({ sections: ['BIOCH'] });
     expect(JSON.stringify(auditCall.after)).not.toContain('argon-hash');
   });
 
@@ -95,7 +113,7 @@ describe('UsersService', () => {
     ctx.users.findByUsername.mockResolvedValue(makeUser());
     await expect(
       ctx.service.create(
-        { username: 'bio1', fullName: 'X Y', email: null, roles: ['BIOLOGISTE'], temporaryPassword: 'Temp@12345!' },
+        { username: 'bio1', fullName: 'X Y', email: null, roles: ['BIOLOGISTE'], sectionIds: [BIOCH], temporaryPassword: 'Temp@12345!' },
         actor,
       ),
     ).rejects.toMatchObject({ status: 409 });
@@ -135,5 +153,43 @@ describe('UsersService', () => {
     const ctx = setup(makeUser());
     await ctx.service.update(OTHER_ID, { fullName: 'Biologiste Un' }, actor);
     expect(ctx.audit.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('UsersService – habilitations par service', () => {
+  const base = { username: 'tech2', fullName: 'Tech Deux', email: null, temporaryPassword: 'Temp@12345!' };
+
+  it('exige au moins un service pour un technicien ou un biologiste', async () => {
+    const ctx = setup(null);
+    await expectRule(ctx.service.create({ ...base, roles: ['TECHNICIEN'], sectionIds: [] }, actor), 'SECTION_REQUIRED');
+  });
+
+  it('refuse un service pour un rôle non limité (accueil, caisse…)', async () => {
+    const ctx = setup(null);
+    await expectRule(ctx.service.create({ ...base, roles: ['RECEPTION'], sectionIds: [BIOCH] }, actor), 'SECTIONS_NOT_APPLICABLE');
+  });
+
+  it('refuse un service désactivé ou inconnu', async () => {
+    const ctx = setup(null);
+    await expectRule(ctx.service.create({ ...base, roles: ['BIOLOGISTE'], sectionIds: [HEMATO] }, actor), 'SECTION_INACTIVE');
+    await expectRule(
+      ctx.service.create({ ...base, roles: ['BIOLOGISTE'], sectionIds: ['55555555-5555-4555-8555-555555555555'] }, actor),
+      'SECTION_UNKNOWN',
+    );
+  });
+
+  it('modification : services conservés s’ils ne sont pas fournis, changement tracé dans l’audit', async () => {
+    const ctx = setup(makeUser({ roles: ['TECHNICIEN'] }), 1, [BIOCH]);
+    await ctx.service.update(OTHER_ID, { fullName: 'Tech Renommé' }, actor);
+    expect(ctx.users.replaceSections).toHaveBeenLastCalledWith(OTHER_ID, [BIOCH], ADMIN_ID, ctx.tx);
+  });
+
+  it('un compte qui n’est plus technicien perd ses services', async () => {
+    const ctx = setup(makeUser({ roles: ['TECHNICIEN'] }), 1, [BIOCH]);
+    await ctx.service.update(OTHER_ID, { roles: ['RECEPTION'] }, actor);
+    expect(ctx.users.replaceSections).toHaveBeenLastCalledWith(OTHER_ID, [], ADMIN_ID, ctx.tx);
+    const audit = ctx.audit.record.mock.calls.at(-1)![1];
+    expect(audit.before).toMatchObject({ sections: ['BIOCH'] });
+    expect(audit.after).toMatchObject({ sections: [] });
   });
 });

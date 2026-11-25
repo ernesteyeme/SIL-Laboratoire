@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import {
   createUserSchema,
+  isSectionScoped,
   PASSWORD_MIN_LENGTH,
   updateUserSchema,
   type CreateUserInput,
@@ -18,6 +19,7 @@ import { Modal } from '@/components/ui/Modal';
 import { useCreateUser, useUpdateUser } from '@/features/users';
 import { applyApiFieldErrors, errorMessage, generateTemporaryPassword } from '@/lib/utils';
 import { RoleCheckboxes } from './RoleCheckboxes';
+import { SectionCheckboxes } from './SectionCheckboxes';
 
 interface Props {
   open: boolean;
@@ -34,7 +36,7 @@ export function UserFormModal({ open, user, onClose, onSaved }: Props) {
   );
 }
 
-const CREATE_FIELDS = ['username', 'fullName', 'email', 'roles', 'temporaryPassword'] as const;
+const CREATE_FIELDS = ['username', 'fullName', 'email', 'roles', 'sectionIds', 'temporaryPassword'] as const;
 
 function CreateUserForm({ open, onClose, onSaved }: Omit<Props, 'user'>) {
   const create = useCreateUser();
@@ -46,15 +48,17 @@ function CreateUserForm({ open, onClose, onSaved }: Omit<Props, 'user'>) {
     setValue,
     setError,
     reset,
+    watch,
     formState: { errors },
   } = useForm<CreateUserInput>({
     resolver: zodResolver(createUserSchema),
-    defaultValues: { username: '', fullName: '', email: '', roles: [], temporaryPassword: '' },
+    defaultValues: { username: '', fullName: '', email: '', roles: [], sectionIds: [], temporaryPassword: '' },
   });
+  const scoped = isSectionScoped(watch('roles') ?? []);
 
   useEffect(() => {
     if (open) {
-      reset({ username: '', fullName: '', email: '', roles: [], temporaryPassword: generateTemporaryPassword() });
+      reset({ username: '', fullName: '', email: '', roles: [], sectionIds: [], temporaryPassword: generateTemporaryPassword() });
       setFormError(null);
     }
   }, [open, reset]);
@@ -62,7 +66,7 @@ function CreateUserForm({ open, onClose, onSaved }: Omit<Props, 'user'>) {
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);
     try {
-      const created = await create.mutateAsync(values);
+      const created = await create.mutateAsync({ ...values, sectionIds: isSectionScoped(values.roles) ? values.sectionIds : [] });
       onSaved(
         `Compte « ${created.username} » créé. Communiquez-lui le mot de passe temporaire : il devra le changer à la première connexion.`,
       );
@@ -131,12 +135,19 @@ function CreateUserForm({ open, onClose, onSaved }: Omit<Props, 'user'>) {
             <RoleCheckboxes value={field.value} onChange={field.onChange} error={errors.roles?.message} />
           )}
         />
+        {scoped && (
+          <Controller
+            control={control}
+            name="sectionIds"
+            render={({ field }) => <SectionCheckboxes value={field.value ?? []} onChange={field.onChange} error={errors.sectionIds?.message} />}
+          />
+        )}
       </form>
     </Modal>
   );
 }
 
-const EDIT_FIELDS = ['fullName', 'email', 'roles'] as const;
+const EDIT_FIELDS = ['fullName', 'email', 'roles', 'sectionIds'] as const;
 
 function EditUserForm({ open, user, onClose, onSaved }: Props & { user: UserDto }) {
   const { user: me } = useAuth();
@@ -150,15 +161,17 @@ function EditUserForm({ open, user, onClose, onSaved }: Props & { user: UserDto 
     handleSubmit,
     setError,
     reset,
+    watch,
     formState: { errors, isDirty },
   } = useForm<UpdateUserInput>({
     resolver: zodResolver(updateUserSchema),
-    defaultValues: { fullName: user.fullName, email: user.email ?? '', roles: user.roles },
+    defaultValues: { fullName: user.fullName, email: user.email ?? '', roles: user.roles, sectionIds: user.sections.map((s) => s.id) },
   });
+  const scoped = isSectionScoped(watch('roles') ?? user.roles);
 
   useEffect(() => {
     if (open) {
-      reset({ fullName: user.fullName, email: user.email ?? '', roles: user.roles });
+      reset({ fullName: user.fullName, email: user.email ?? '', roles: user.roles, sectionIds: user.sections.map((s) => s.id) });
       setFormError(null);
     }
   }, [open, user, reset]);
@@ -166,7 +179,8 @@ function EditUserForm({ open, user, onClose, onSaved }: Props & { user: UserDto 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);
     try {
-      await update.mutateAsync({ id: user.id, body: values });
+      const roles = values.roles ?? user.roles;
+      await update.mutateAsync({ id: user.id, body: { ...values, sectionIds: isSectionScoped(roles) ? (values.sectionIds ?? []) : [] } });
       onSaved(`Compte « ${user.username} » mis à jour.`);
       onClose();
     } catch (error) {
@@ -210,6 +224,13 @@ function EditUserForm({ open, user, onClose, onSaved }: Props & { user: UserDto 
             />
           )}
         />
+        {scoped && (
+          <Controller
+            control={control}
+            name="sectionIds"
+            render={({ field }) => <SectionCheckboxes value={field.value ?? []} onChange={field.onChange} error={errors.sectionIds?.message} />}
+          />
+        )}
         {isSelf && (
           <p className="text-xs text-slate-500">Vous ne pouvez pas retirer votre propre rôle Administrateur.</p>
         )}

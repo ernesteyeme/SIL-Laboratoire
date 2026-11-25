@@ -1,12 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import type {
-  CreateUserInput,
-  ListUsersQuery,
-  Paginated,
-  ResetPasswordInput,
-  UpdateUserInput,
-  UserDto,
-  UserStatusChangeInput,
+import {
+  isSectionScoped,
+  SECTION_REQUIRED_MESSAGE,
+  type Role,
+  type CreateUserInput,
+  type ListUsersQuery,
+  type Paginated,
+  type ResetPasswordInput,
+  type UpdateUserInput,
+  type UserDto,
+  type UserStatusChangeInput,
 } from '@lims/shared';
 import type { User } from '../../generated/prisma/client';
 import { AuditService } from '../../core/audit/audit.service';
@@ -42,7 +45,40 @@ export class UsersService {
   }
 
   async get(id: string): Promise<UserDto> {
-    return toUserDto(await this.getOrThrow(id));
+    return this.dto(id);
+  }
+
+  private async dto(id: string): Promise<UserDto> {
+    const user = await this.users.findWithSections(id);
+    if (!user) throw new NotFoundError('Utilisateur', id);
+    return toUserDto(user);
+  }
+
+  /**
+   * Habilitations par service : obligatoires (au moins un service) pour un technicien ou un biologiste,
+   * sans objet pour les autres rôles. Renvoie les codes des services, pour l'audit.
+   */
+  private async checkSections(db: Db, roles: Role[], sectionIds: string[], required = true): Promise<string[]> {
+    if (!isSectionScoped(roles)) {
+      if (sectionIds.length > 0) {
+        throw new BusinessRuleError('SECTIONS_NOT_APPLICABLE', 'Les services ne s’attribuent qu’aux techniciens et aux biologistes : les autres rôles ne sont pas limités à un service.');
+      }
+      return [];
+    }
+    if (sectionIds.length === 0) {
+      if (required) throw new BusinessRuleError('SECTION_REQUIRED', SECTION_REQUIRED_MESSAGE);
+      return [];
+    }
+    const found = await db.labSection.findMany({ where: { id: { in: sectionIds } }, select: { id: true, code: true, name: true, isActive: true } });
+    if (found.length !== sectionIds.length) throw new BusinessRuleError('SECTION_UNKNOWN', 'Un des services choisis n’existe pas.');
+    const inactive = found.filter((f) => !f.isActive);
+    if (inactive.length > 0) throw new BusinessRuleError('SECTION_INACTIVE', `Service désactivé : ${inactive.map((f) => f.name).join(', ')}.`);
+    return found.map((f) => f.code);
+  }
+
+  private async sectionCodes(db: Db, userId: string): Promise<string[]> {
+    const rows = await db.userSection.findMany({ where: { userId }, select: { section: { select: { code: true } } } });
+    return rows.map((r) => r.section.code);
   }
 
   async create(input: CreateUserInput, actor: RequestUser): Promise<UserDto> {
@@ -52,6 +88,7 @@ export class UsersService {
     const passwordHash = await this.passwords.hash(input.temporaryPassword);
 
     const created = await this.prisma.$transaction(async (tx) => {
+      const codes = await this.checkSections(tx, input.roles, input.sectionIds);
       const user = await this.users.create(
         {
           username: input.username,
@@ -64,16 +101,17 @@ export class UsersService {
         },
         tx,
       );
+      await this.users.replaceSections(user.id, input.sectionIds, actor.id, tx);
       await this.audit.record(tx, {
         action: 'CREATE',
         entity: 'User',
         entityId: user.id,
-        after: toUserAuditView(user),
+        after: toUserAuditView(user, codes),
       });
       return user;
     });
 
-    return toUserDto(created);
+    return this.dto(created.id);
   }
 
   async update(id: string, input: UpdateUserInput, actor: RequestUser): Promise<UserDto> {
@@ -98,6 +136,14 @@ export class UsersService {
         }
       }
 
+      const beforeCodes = await this.sectionCodes(tx, id);
+      const roles = input.roles ?? current.roles;
+      // Un compte qui n'est plus technicien ni biologiste perd ses services ; sinon ils sont conservés s'ils ne sont pas fournis.
+      const currentIds = (await tx.userSection.findMany({ where: { userId: id }, select: { sectionId: true } })).map((r) => r.sectionId);
+      const sectionIds = input.sectionIds ?? (isSectionScoped(roles) ? currentIds : []);
+      // Exigence vérifiée quand les rôles ou les services changent (un simple renommage ne bloque pas).
+      const afterCodes = await this.checkSections(tx, roles, sectionIds, input.roles !== undefined || input.sectionIds !== undefined);
+
       const next = await this.users.update(
         id,
         {
@@ -107,9 +153,10 @@ export class UsersService {
         },
         tx,
       );
+      await this.users.replaceSections(id, sectionIds, actor.id, tx);
 
-      const before = toUserAuditView(current);
-      const after = toUserAuditView(next);
+      const before = toUserAuditView(current, beforeCodes);
+      const after = toUserAuditView(next, afterCodes);
       const fields = changedFields(before, after);
       if (fields.length > 0) {
         await this.audit.record(tx, {
@@ -124,7 +171,7 @@ export class UsersService {
       return next;
     });
 
-    return toUserDto(updated);
+    return this.dto(updated.id);
   }
 
   async resetPassword(id: string, input: ResetPasswordInput, actor: RequestUser): Promise<UserDto> {
@@ -166,7 +213,7 @@ export class UsersService {
       return next;
     });
 
-    return toUserDto(updated);
+    return this.dto(updated.id);
   }
 
   async deactivate(id: string, input: UserStatusChangeInput, actor: RequestUser): Promise<UserDto> {
@@ -206,7 +253,7 @@ export class UsersService {
       return next;
     });
 
-    return toUserDto(updated);
+    return this.dto(updated.id);
   }
 
   async reactivate(id: string, input: UserStatusChangeInput): Promise<UserDto> {
@@ -240,7 +287,7 @@ export class UsersService {
       return next;
     });
 
-    return toUserDto(updated);
+    return this.dto(updated.id);
   }
 
   async unlock(id: string, input: UserStatusChangeInput): Promise<UserDto> {
@@ -262,7 +309,7 @@ export class UsersService {
       return next;
     });
 
-    return toUserDto(updated);
+    return this.dto(updated.id);
   }
 
   private async getOrThrow(id: string, db: Db = this.prisma): Promise<User> {

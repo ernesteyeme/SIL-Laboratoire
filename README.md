@@ -201,6 +201,8 @@ Groupes de rôles : `apps/api/src/core/security/role-groups.ts`, repris dans `ap
 | Interopérabilité : correspondances DHIS2 et VLSM | ✔ | — | — | — | ✔ | ✔ | — |
 | Interopérabilité : simuler / envoyer à DHIS2, envoyer à VLSM | — | — | — | — | ✔ | ✔ | — |
 
+**Habilitations par service (version 1.8.0).** Les rôles TECHNICIEN et BIOLOGISTE sont en plus limités aux services (sections) cochés dans leur fiche : voir la section 11 bis.
+
 Règles métier protégées : impossible de se désactiver soi-même, de retirer son propre rôle ADMIN, ou de supprimer le dernier administrateur actif. Toute désactivation, réactivation, réinitialisation ou tout déverrouillage exige un **motif**.
 
 ---
@@ -606,6 +608,40 @@ L'administrateur configure et teste les connexions, mais ne transmet pas de donn
   - aperçu, CSV, simulation, envoi, renvoi, conflit DHIS2 et période future ;
   - VLSM : file, blocage, envoi VL/EID, correction v2, structure inconnue, échec de connexion ;
   - journal en ajout seul, désactivation et chaîne d'audit.
+
+---
+
+## 11 bis. Version 1.8.0 — Habilitations par service (ISO 15189 §6.2)
+
+Chaque technicien et chaque biologiste n'agit que sur les examens des services qui lui sont attribués (Biochimie, Hématologie, Parasitologie, Microbiologie, Immunologie – Sérologie, Biologie moléculaire…). Un biologiste peut être habilité à plusieurs services.
+
+### Attribution
+- **Utilisateurs → Nouveau / Modifier** : l'administrateur coche les **services habilités**. Les cases n'apparaissent que pour les rôles TECHNICIEN et BIOLOGISTE ; au moins un service est obligatoire.
+- Les autres rôles (administration, accueil, caisse, qualité, comptabilité) ne sont pas limités : attribuer un service à ces comptes est refusé (`SECTIONS_NOT_APPLICABLE`).
+- Un service désactivé ne peut pas être attribué (`SECTION_INACTIVE`).
+- La liste des utilisateurs affiche les services de chacun et se filtre par service.
+- Chaque attribution ou retrait est tracé dans la piste d'audit (codes des services avant / après, auteur, date).
+
+### Ce qui est limité (contrôlé par l'API, pas seulement masqué à l'écran)
+| Action | Hors de ses services |
+|---|---|
+| Paillasse (liste de travail) | par défaut, seulement ses services ; demander un autre service → 403 |
+| Saisie des résultats, validation technique | 403 `SECTION_NOT_AUTHORIZED` |
+| Communication d'une valeur critique | 403 |
+| Validation biologique, renvoi en saisie, correction après validation | 403 |
+| CIQ : saisie d'une série, action corrective | 403 (service du paramètre contrôlé) |
+| Automates : import de fichier, relance, acceptation, écart | 403 (service de l'automate et de l'examen) |
+
+Restent ouverts à tous les rôles concernés : la lecture d'un dossier complet (les examens des autres services s'affichent **en lecture seule**, avec un message), la réception des échantillons, les comptes rendus et la déclaration de non-conformités.
+
+Les habilitations sont relues en base à chaque action : un retrait prend effet immédiatement, sans reconnexion. Les comptes de service des automates ne sont pas concernés ; leurs résultats restent soumis à la validation d'un personnel habilité.
+
+### Mise à jour d'un laboratoire existant
+La migration `20261125000000_habilitations_services` attribue **tous les services** à chaque technicien et biologiste existant, pour ne bloquer personne le jour de la mise à jour (une entrée d'audit par compte). **L'administrateur doit ensuite restreindre chaque compte** à ses services réels depuis l'écran Utilisateurs.
+
+### Tests
+- Unitaires : règles des comptes (service obligatoire, non applicable, inconnu, désactivé, perte des services au changement de rôle) et refus hors service dans la saisie et les validations.
+- Fumée : `node --env-file=.env scripts/smoke-test-step8.mjs http://localhost:3000/api` — un technicien de Biochimie saisit la glycémie mais pas la NFS, paillasse filtrée, biologiste d'Hématologie refusé sur la glycémie, biologiste multi-services accepté, retrait d'habilitation immédiat, audit intègre.
 
 ---
 

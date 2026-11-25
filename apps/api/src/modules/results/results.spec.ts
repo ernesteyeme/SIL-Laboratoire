@@ -2,6 +2,8 @@ import { computeResultFlag, parseNumericInput, type RangeSnapshot } from '@lims/
 import { Prisma } from '../../generated/prisma/client';
 import type { AuditService } from '../../core/audit/audit.service';
 import type { LabContextService } from '../../core/common/lab-context.service';
+import { isSectionScoped } from '@lims/shared';
+import { SectionAccessService } from '../../core/security/section-access.service';
 import type { RequestUser } from '../../core/context/request-context';
 import { DomainException } from '../../core/errors/domain.exception';
 import type { PrismaService } from '../../core/prisma/prisma.service';
@@ -95,7 +97,10 @@ const reports = { issue: jest.fn().mockResolvedValue('rep1') } as unknown as jes
 const lab = { settings: jest.fn().mockResolvedValue({ timezone: 'Africa/Kinshasa' }), userNames: jest.fn().mockResolvedValue(new Map()) } as unknown as LabContextService;
 const audit = { record: jest.fn() } as unknown as jest.Mocked<AuditService>;
 const qc = { assertQcAllowsValidation: jest.fn() } as unknown as jest.Mocked<QcService>;
-const service = new ResultsService(prisma, repo, orders, reports, lab, audit, qc);
+const sectionAccess = new SectionAccessService(prisma);
+const allowed = new Map<string, string[]>([['u-tech', ['sec']], ['u-bio', ['sec']], ['u-tech-bioch', ['sec-bioch']]]);
+jest.spyOn(sectionAccess, 'allowedSections').mockImplementation(async (a) => (isSectionScoped(a.roles) ? new Set(allowed.get(a.id) ?? []) : null));
+const service = new ResultsService(prisma, repo, orders, reports, lab, audit, qc, sectionAccess);
 const tech: RequestUser = { id: 'u-tech', username: 'tech', fullName: 'Tech', roles: ['TECHNICIEN'] } as RequestUser;
 const bio: RequestUser = { id: 'u-bio', username: 'bio', fullName: 'Bio', roles: ['BIOLOGISTE'] } as RequestUser;
 
@@ -240,5 +245,26 @@ describe('ResultsService – règles analytiques', () => {
     repo.findSampleForInit.mockResolvedValue(sampleRow(null) as never);
     await service.initializeForSample(tx as never, 's1');
     expect(tx.testResult.createMany).toHaveBeenCalledWith({ data: [expect.objectContaining({ refLow: D(12) })] });
+  });
+});
+
+describe('ResultsService – habilitations par service', () => {
+  const techBioch: RequestUser = { id: 'u-tech-bioch', username: 'tb', fullName: 'Tech Biochimie', roles: ['TECHNICIEN'] } as RequestUser;
+
+  it('refuse la saisie et les validations hors des services attribués (403)', async () => {
+    repo.findItemWithOrder.mockResolvedValue(item() as never);
+    for (const p of [
+      service.save('i1', { results: [] }, techBioch),
+      service.technicalValidate('i1', techBioch),
+      service.amend('i1', { reason: 'Erreur de saisie' }, techBioch),
+    ]) {
+      await expect(p).rejects.toMatchObject({ status: 403 });
+      await p.catch((e: DomainException) => expect((e.getResponse() as { details: { rule: string } }).details.rule).toBe('SECTION_NOT_AUTHORIZED'));
+    }
+  });
+
+  it('un compte de service d’automate (sans rôle) n’est pas limité à un service', async () => {
+    const instrument = { id: 'svc', username: 'automate-xn', fullName: 'Automate', roles: [] } as unknown as RequestUser;
+    await expect(sectionAccess.allowedSections(instrument)).resolves.toBeNull();
   });
 });

@@ -36,10 +36,16 @@ async function login(username, password) {
   if (r.status !== 200) throw new Error(`Connexion ${username} impossible : ${JSON.stringify(r.body)}`);
   return r.body.accessToken;
 }
+// Habilitations par service (1.8.0) : les techniciens/biologistes de test reçoivent tous les services actifs.
+async function allSectionIds(adminToken, roles) {
+  if (!roles.some((r) => r === 'TECHNICIEN' || r === 'BIOLOGISTE')) return [];
+  const s = await call('GET', '/catalog/sections', { token: adminToken });
+  return s.body.filter((x) => x.isActive).map((x) => x.id);
+}
 async function createStaff(adminToken, username, roles) {
   const temp = 'Temp#Smoke2026';
   const finalPw = 'Final#Smoke2026';
-  const c = await call('POST', '/users', { token: adminToken, body: { username, fullName: `Test ${username}`, roles, temporaryPassword: temp } });
+  const c = await call('POST', '/users', { token: adminToken, body: { username, fullName: `Test ${username}`, roles, sectionIds: await allSectionIds(adminToken, roles), temporaryPassword: temp } });
   if (c.status !== 201) throw new Error(`Création ${username} : ${JSON.stringify(c.body)}`);
   const t = await login(username, temp);
   const cp = await call('POST', '/auth/change-password', { token: t, body: { currentPassword: temp, newPassword: finalPw, confirmPassword: finalPw } });

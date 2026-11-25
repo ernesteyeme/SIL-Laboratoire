@@ -1,6 +1,8 @@
 import { KeyRound, Lock, Pencil, Plus, RotateCcw, Search, Unlock, UserX, Users } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { ROLE_LABELS, ROLES, type Role, type UserDto } from '@lims/shared';
+import { isSectionScoped, ROLE_LABELS, ROLES, type Role, type UserDto } from '@lims/shared';
+import { useQuery } from '@tanstack/react-query';
+import { sectionsQuery } from '@/features/catalog';
 import { useAuth } from '@/auth/useAuth';
 import { Button } from '@/components/ui/Button';
 import { SelectField, TextField } from '@/components/ui/Field';
@@ -14,8 +16,9 @@ import { UserFormModal } from './UserFormModal';
 
 export function UsersPage() {
   const { user: me } = useAuth();
-  const [filter, setFilter] = useState<UsersFilter>({ page: 1, pageSize: 20, search: '', role: '', status: 'active' });
+  const [filter, setFilter] = useState<UsersFilter>({ page: 1, pageSize: 20, search: '', role: '', sectionId: '', status: 'active' });
   const [searchInput, setSearchInput] = useState('');
+  const { data: sections } = useQuery(sectionsQuery);
   const [notice, setNotice] = useState<string | null>(null);
   const [formUser, setFormUser] = useState<UserDto | null | undefined>(undefined);
   const [resetUser, setResetUser] = useState<UserDto | null>(null);
@@ -72,6 +75,18 @@ export function UsersPage() {
             ))}
           </SelectField>
           <SelectField
+            label="Service"
+            value={filter.sectionId}
+            onChange={(e) => setFilter((f) => ({ ...f, sectionId: e.target.value, page: 1 }))}
+          >
+            <option value="">Tous les services</option>
+            {(sections ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </SelectField>
+          <SelectField
             label="Statut"
             value={filter.status}
             onChange={(e) => setFilter((f) => ({ ...f, status: e.target.value as UsersFilter['status'], page: 1 }))}
@@ -100,6 +115,7 @@ export function UsersPage() {
                   <tr>
                     <th className="px-4 py-3">Utilisateur</th>
                     <th className="px-4 py-3">Rôles</th>
+                    <th className="px-4 py-3">Services</th>
                     <th className="px-4 py-3">Statut</th>
                     <th className="px-4 py-3">Dernière connexion</th>
                     <th className="px-4 py-3 text-right">Actions</th>
@@ -123,6 +139,17 @@ export function UsersPage() {
                             </Badge>
                           ))}
                         </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-600">
+                        {isSectionScoped(u.roles) ? (
+                          u.sections.length > 0 ? (
+                            u.sections.map((s) => s.name).join(', ')
+                          ) : (
+                            <span className="text-amber-700">Aucun service</span>
+                          )
+                        ) : (
+                          <span className="text-slate-400">Tous (rôle non limité)</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">

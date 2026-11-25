@@ -13,12 +13,7 @@ Un serveur de laboratoire n'a donc besoin ni de pnpm, ni d'outils de compilation
 Le dépôt [ernesteyeme/SIL-Laboratoire](https://github.com/ernesteyeme/SIL-Laboratoire) publie les versions lui-même :
 
 1. Mettez à jour `version` dans `package.json`, puis envoyez la modification sur `main`. L'intégration continue vérifie les types, les tests et les scripts.
-2. Posez l'étiquette correspondante et envoyez-la :
-
-    ```bash
-    git tag v1.8.0 && git push origin v1.8.0
-    ```
-
+2. C'est tout : si la publication `vX.Y.Z` n'existe pas encore, le workflow la crée, étiquette comprise. Vous pouvez aussi poser l'étiquette vous-même (`git tag v1.8.0 && git push origin v1.8.0`) ou la créer depuis la page **Releases** de GitHub.
 3. Le workflow **Publication** (`.github/workflows/release.yml`) construit l'archive, tests compris, puis la publie dans **Releases** avec son `.sha256` et `latest.json`.
 
 Dès lors :

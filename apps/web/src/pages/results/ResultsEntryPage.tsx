@@ -241,9 +241,10 @@ function referenceLabel(r: ResultDto): string {
 }
 
 function ExamCard({ item, highlighted, onNotice }: { item: AnalysisItemDto; highlighted: boolean; onNotice: (m: string, tone?: 'success' | 'error') => void }) {
-  const { hasRole } = useAuth();
-  const isAnalyst = hasRole(...ANALYSIS_ROLES);
-  const isBiologist = hasRole(...BIOLOGIST_ROLES);
+  const { hasRole, canActOnSection } = useAuth();
+  const inScope = canActOnSection(item.section.id);
+  const isAnalyst = inScope && hasRole(...ANALYSIS_ROLES);
+  const isBiologist = inScope && hasRole(...BIOLOGIST_ROLES);
   const editable = isAnalyst && (item.status === 'TO_ENTER' || item.status === 'ENTERED');
   const save = useSaveResults();
   const technical = useTechnicalValidation();
@@ -324,6 +325,12 @@ function ExamCard({ item, highlighted, onNotice }: { item: AnalysisItemDto; high
         </div>
 
         <div className="space-y-3 p-4">
+          {!inScope && (
+            <Alert tone="info">
+              Lecture seule : vous n’êtes pas habilité(e) au service « {item.section.name} ». La saisie et les validations sont réservées au
+              personnel de ce service.
+            </Alert>
+          )}
           {item.status === 'AWAITING_SAMPLE' && <Alert tone="info">L’échantillon n’a pas encore été reçu au laboratoire : la saisie s’ouvrira à la réception.</Alert>}
           {item.reservations.length > 0 && (
             <Alert tone="warning" title="Échantillon accepté sous réserve (dérogation)">

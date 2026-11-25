@@ -482,3 +482,18 @@ export const INTEROP_RUN_STATUS_LABELS: Record<InteropRunStatus, string> = {
 
 export const VLSM_SUBMISSION_STATUSES = ['SENT', 'FAILED'] as const;
 export type VlsmSubmissionStatus = (typeof VLSM_SUBMISSION_STATUSES)[number];
+
+// ---------------------------------------------------------------------------
+// Version 1.8.0 — Habilitations par service (ISO 15189 §6.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rôles dont les actions sur les résultats (saisie, validations, CIQ, automates) sont limitées aux services
+ * (sections du laboratoire) où la personne est habilitée.
+ */
+export const SECTION_SCOPED_ROLES = ['TECHNICIEN', 'BIOLOGISTE'] as const satisfies readonly Role[];
+
+/** Vrai si le compte doit être habilité sur au moins un service. */
+export function isSectionScoped(roles: readonly Role[]): boolean {
+  return roles.some((r) => (SECTION_SCOPED_ROLES as readonly Role[]).includes(r));
+}

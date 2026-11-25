@@ -35,8 +35,8 @@ export class ResultsController {
   /** Liste de travail (paillasse) par section et par étape. */
   @Get('worklist')
   @Roles(...ANALYSTS)
-  worklist(@Query(new ZodValidationPipe(worklistQuerySchema)) query: WorklistQuery): Promise<Paginated<WorklistItemDto>> {
-    return this.results.worklist(query);
+  worklist(@Query(new ZodValidationPipe(worklistQuerySchema)) query: WorklistQuery, @CurrentUser() actor: RequestUser): Promise<Paginated<WorklistItemDto>> {
+    return this.results.worklist(query, actor);
   }
 
   @Get('orders/:orderId')
@@ -76,8 +76,12 @@ export class ResultsController {
   @Post('items/:id/return')
   @HttpCode(HttpStatus.OK)
   @Roles('BIOLOGISTE')
-  returnToEntry(@Param('id', uuidPipe) id: string, @Body(new ZodValidationPipe(resultReasonSchema)) body: ResultReasonInput): Promise<AnalysisItemDto> {
-    return this.results.returnToEntry(id, body);
+  returnToEntry(
+    @Param('id', uuidPipe) id: string,
+    @Body(new ZodValidationPipe(resultReasonSchema)) body: ResultReasonInput,
+    @CurrentUser() actor: RequestUser,
+  ): Promise<AnalysisItemDto> {
+    return this.results.returnToEntry(id, body, actor);
   }
 
   @Post('items/:id/amend')

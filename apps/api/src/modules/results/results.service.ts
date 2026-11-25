@@ -31,6 +31,7 @@ import type { RequestUser } from '../../core/context/request-context';
 import { BusinessRuleError, DomainException, NotFoundError } from '../../core/errors/domain.exception';
 import { labPeriods } from '../../core/numbering/numbering.service';
 import { PrismaService, type Db } from '../../core/prisma/prisma.service';
+import { SectionAccessService, SectionNotAuthorizedError } from '../../core/security/section-access.service';
 import { toPatientSummary } from '../billing/billing.mapper';
 import { OrdersService } from '../orders/orders.service';
 import { QcService } from '../quality/qc.service';
@@ -63,6 +64,7 @@ export class ResultsService {
     private readonly lab: LabContextService,
     private readonly audit: AuditService,
     private readonly qc: QcService,
+    private readonly sections: SectionAccessService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -163,8 +165,14 @@ export class ResultsService {
     };
   }
 
-  async worklist(query: WorklistQuery): Promise<Paginated<WorklistItemDto>> {
-    const [rows, total] = await this.repo.worklist(query);
+  /** Paillasse : limitée aux services où la personne est habilitée (techniciens, biologistes). */
+  async worklist(query: WorklistQuery, actor: RequestUser): Promise<Paginated<WorklistItemDto>> {
+    const scope = await this.sections.scopeFilter(actor, query.sectionId);
+    if (!scope.requestedAllowed) {
+      const section = await this.prisma.labSection.findUnique({ where: { id: query.sectionId! }, select: { name: true } });
+      throw new SectionNotAuthorizedError(section?.name ?? 'demandé', 'consultation de la paillasse');
+    }
+    const [rows, total] = await this.repo.worklist(query, scope.sectionIds);
     const now = Date.now();
     return toPage(
       rows.map((i) => {
@@ -203,6 +211,7 @@ export class ResultsService {
   async save(itemId: string, input: SaveResultsInput, actor: RequestUser, origin?: { instrumentId: string }): Promise<AnalysisItemDto> {
     await this.prisma.$transaction(async (tx) => {
       const item = await this.lockAndLoad(itemId, tx);
+      await this.sections.assertCanAct(tx, actor, item.exam.section, 'saisie des résultats');
       if (item.analysisStatus === 'TECHNICAL_VALIDATED') {
         throw new BusinessRuleError('ITEM_TECHNICALLY_VALIDATED', 'Résultats validés techniquement : un biologiste doit les renvoyer en saisie pour modification.');
       }
@@ -324,6 +333,8 @@ export class ResultsService {
       const alert = await tx.criticalAlert.findUnique({ where: { id: alertId } });
       if (!alert) throw new NotFoundError('Alerte', alertId);
       await this.repo.lockItem(alert.orderItemId, tx);
+      const alertItem = await this.repo.findItemWithOrder(alert.orderItemId, tx);
+      if (alertItem) await this.sections.assertCanAct(tx, actor, alertItem.exam.section, 'communication de la valeur critique');
       if (alert.cancelledAt) throw new BusinessRuleError('ALERT_CANCELLED', 'Cette alerte est sans objet (valeur corrigée).');
       if (alert.acknowledgedAt) throw new BusinessRuleError('ALERT_ALREADY_ACKNOWLEDGED', 'Cette alerte a déjà été communiquée.');
       const next = await tx.criticalAlert.update({
@@ -350,6 +361,7 @@ export class ResultsService {
   async technicalValidate(itemId: string, actor: RequestUser): Promise<AnalysisItemDto> {
     await this.prisma.$transaction(async (tx) => {
       const item = await this.lockAndLoad(itemId, tx);
+      await this.sections.assertCanAct(tx, actor, item.exam.section, 'validation technique');
       if (item.analysisStatus === 'TO_ENTER') {
         const missing = item.results.filter((r) => !isFilled(r)).map((r) => r.parameterName);
         throw new BusinessRuleError('RESULTS_INCOMPLETE', `Résultats incomplets : ${missing.join(', ')}.`);
@@ -382,6 +394,7 @@ export class ResultsService {
     await this.prisma.$transaction(
       async (tx) => {
         const item = await this.lockAndLoad(itemId, tx);
+        await this.sections.assertCanAct(tx, actor, item.exam.section, 'validation biologique');
         if (item.analysisStatus !== 'TECHNICAL_VALIDATED') {
           throw new BusinessRuleError(
             'TECHNICAL_VALIDATION_REQUIRED',
@@ -423,9 +436,10 @@ export class ResultsService {
   }
 
   /** Le biologiste renvoie des résultats validés techniquement en saisie (avant validation biologique). */
-  async returnToEntry(itemId: string, input: ResultReasonInput): Promise<AnalysisItemDto> {
+  async returnToEntry(itemId: string, input: ResultReasonInput, actor: RequestUser): Promise<AnalysisItemDto> {
     await this.prisma.$transaction(async (tx) => {
       const item = await this.lockAndLoad(itemId, tx);
+      await this.sections.assertCanAct(tx, actor, item.exam.section, 'renvoi en saisie');
       if (item.analysisStatus !== 'TECHNICAL_VALIDATED') {
         throw new BusinessRuleError('INVALID_STATUS', 'Seuls des résultats validés techniquement peuvent être renvoyés en saisie.');
       }
@@ -452,6 +466,7 @@ export class ResultsService {
   async amend(itemId: string, input: ResultReasonInput, actor: RequestUser): Promise<AnalysisItemDto> {
     await this.prisma.$transaction(async (tx) => {
       const item = await this.lockAndLoad(itemId, tx);
+      await this.sections.assertCanAct(tx, actor, item.exam.section, 'correction après validation');
       if (item.analysisStatus !== 'VALIDATED') {
         throw new BusinessRuleError('INVALID_STATUS', 'Seuls des résultats validés biologiquement peuvent faire l’objet d’une correction.');
       }

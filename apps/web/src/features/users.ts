@@ -15,6 +15,7 @@ export interface UsersFilter {
   pageSize: number;
   search?: string;
   role?: Role | '';
+  sectionId?: string;
   status: 'active' | 'inactive' | 'all';
 }
 

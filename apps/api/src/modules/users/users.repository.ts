@@ -3,6 +3,11 @@ import type { ListUsersQuery } from '@lims/shared';
 import type { Prisma, User } from '../../generated/prisma/client';
 import { PrismaService, type Db } from '../../core/prisma/prisma.service';
 
+export const userSectionsInclude = {
+  sections: { include: { section: { select: { id: true, code: true, name: true, displayOrder: true } } } },
+} satisfies Prisma.UserInclude;
+export type UserWithSections = Prisma.UserGetPayload<{ include: typeof userSectionsInclude }>;
+
 @Injectable()
 export class UsersRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -19,11 +24,24 @@ export class UsersRepository {
     return db.user.findUnique({ where: { email } });
   }
 
-  async findMany(query: ListUsersQuery): Promise<[User[], number]> {
+  findWithSections(id: string, db: Db = this.prisma): Promise<UserWithSections | null> {
+    return db.user.findUnique({ where: { id }, include: userSectionsInclude });
+  }
+
+  /** Remplace les services attribués ; affiche les codes avant et après. */
+  async replaceSections(userId: string, sectionIds: string[], grantedById: string, db: Db): Promise<void> {
+    await db.userSection.deleteMany({ where: { userId, sectionId: { notIn: sectionIds } } });
+    if (sectionIds.length > 0) {
+      await db.userSection.createMany({ data: sectionIds.map((sectionId) => ({ userId, sectionId, grantedById })), skipDuplicates: true });
+    }
+  }
+
+  async findMany(query: ListUsersQuery): Promise<[UserWithSections[], number]> {
     const where: Prisma.UserWhereInput = {
       isServiceAccount: false,
       isActive: query.status === 'all' ? undefined : query.status === 'active',
       roles: query.role ? { has: query.role } : undefined,
+      sections: query.sectionId ? { some: { sectionId: query.sectionId } } : undefined,
       OR: query.search
         ? [
             { username: { contains: query.search, mode: 'insensitive' } },
@@ -35,6 +53,7 @@ export class UsersRepository {
     return this.prisma.$transaction([
       this.prisma.user.findMany({
         where,
+        include: userSectionsInclude,
         orderBy: [{ isActive: 'desc' }, { fullName: 'asc' }],
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,

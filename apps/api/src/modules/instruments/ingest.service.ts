@@ -26,6 +26,7 @@ import { dateToIso } from '../../core/common/values';
 import type { RequestUser } from '../../core/context/request-context';
 import { BusinessRuleError, NotFoundError } from '../../core/errors/domain.exception';
 import { PrismaService } from '../../core/prisma/prisma.service';
+import { SectionAccessService } from '../../core/security/section-access.service';
 import { QcService } from '../quality/qc.service';
 import { ResultsService } from '../results/results.service';
 import { toMessageDto, toResultDto } from './instruments.mapper';
@@ -97,7 +98,14 @@ export class InstrumentIngestService {
     private readonly qc: QcService,
     private readonly lab: LabContextService,
     private readonly audit: AuditService,
+    private readonly sections: SectionAccessService,
   ) {}
+
+  /** Habilitations par service : l'automate relève d'une section ; seuls ses techniciens et biologistes le pilotent. */
+  private async assertInstrumentAccess(instrumentId: string, actor: RequestUser, action: string): Promise<void> {
+    const instrument = await this.prisma.instrument.findUnique({ where: { id: instrumentId }, select: { section: { select: { id: true, name: true } } } });
+    if (instrument?.section) await this.sections.assertCanAct(this.prisma, actor, instrument.section, action);
+  }
 
   // ---------------------------------------------------------------------------
   // Réception d'un message
@@ -113,6 +121,7 @@ export class InstrumentIngestService {
    * Un résultat d'automate n'est jamais validé automatiquement : la validation technique puis biologique restent humaines.
    */
   async ingest(instrument: Instrument, raw: string, source: InstrumentMessageSource, actor: RequestUser, filename?: string | null): Promise<IngestResultDto> {
+    if (source === 'UPLOAD') await this.assertInstrumentAccess(instrument.id, actor, 'import d’un fichier de l’automate');
     const sha256 = createHash('sha256').update(raw, 'utf8').digest('hex');
     const previous = await this.repo.findMessageBySha(instrument.id, sha256);
     if (previous) return this.duplicateResponse(instrument, previous, raw);
@@ -470,6 +479,7 @@ export class InstrumentIngestService {
   private async redo(id: string, actor: RequestUser, force: boolean, label: string): Promise<InstrumentResultDto> {
     const row = await this.repo.findResult(id);
     if (!row) throw new NotFoundError('Résultat reçu', id);
+    await this.assertInstrumentAccess(row.instrumentId, actor, label.toLowerCase());
     if (force && row.status !== 'CONFLICT') throw new BusinessRuleError('NOT_A_CONFLICT', 'Seul un conflit avec une saisie existante peut être tranché en faveur de l’automate.');
     if (!INSTRUMENT_RESULT_TO_REVIEW.includes(row.status)) throw new BusinessRuleError('ALREADY_RESOLVED', 'Ce résultat a déjà été traité.');
     const instrument = await this.prisma.instrument.findUniqueOrThrow({ where: { id: row.instrumentId } });
@@ -510,6 +520,9 @@ export class InstrumentIngestService {
   }
 
   async dismiss(id: string, reason: string, actor: RequestUser): Promise<InstrumentResultDto> {
+    const target = await this.repo.findResult(id);
+    if (!target) throw new NotFoundError('Résultat reçu', id);
+    await this.assertInstrumentAccess(target.instrumentId, actor, 'mise à l’écart d’un résultat d’automate');
     await this.prisma.$transaction(async (tx) => {
       await this.repo.lockResult(id, tx);
       const row = await this.repo.findResult(id, tx);

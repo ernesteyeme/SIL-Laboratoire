@@ -129,13 +129,14 @@ export class ResultsRepository {
     return map;
   }
 
-  async worklist(query: WorklistQuery) {
+  /** @param sectionIds services visibles (null : tous) */
+  async worklist(query: WorklistQuery, sectionIds: string[] | null) {
     const q = query.q?.trim();
     const tokens = q ? normalizeText(q).split(' ').filter(Boolean) : [];
     const where: Prisma.OrderItemWhereInput = {
       analysisStatus: query.status,
       order: { status: { not: 'CANCELLED' } },
-      exam: query.sectionId ? { sectionId: query.sectionId } : undefined,
+      exam: sectionIds ? { sectionId: { in: sectionIds } } : undefined,
       ...(query.status === 'VALIDATED' ? { validatedAt: { gte: new Date(Date.now() - 72 * 3600_000) } } : {}),
       OR: q
         ? [

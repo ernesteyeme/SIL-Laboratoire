@@ -1,6 +1,8 @@
-# Publication d'une version : pousser une étiquette vX.Y.Z (identique à « version » de package.json).
-#   git tag v1.7.0 && git push origin v1.7.0
-# ou, depuis github.com : Releases → Draft a new release → étiquette v1.7.0 (créée sur main) → Publish.
+# Publication d'une version, au choix :
+#   - modifier « version » de package.json et pousser sur main : si la publication vX.Y.Z n'existe pas encore,
+#     elle est créée automatiquement (étiquette comprise) ;
+#   - pousser une étiquette vX.Y.Z (identique à « version » de package.json) : git tag v1.8.0 && git push origin v1.8.0 ;
+#   - depuis github.com : Releases → Draft a new release → étiquette vX.Y.Z (créée sur main) → Publish.
 # Construit l'archive autonome (tests compris) et la publie dans GitHub Releases avec son empreinte et
 # latest.json : install.sh et « sudo lims update » y prennent la dernière version.
 name: Publication
@@ -8,6 +10,12 @@ name: Publication
 on:
   push:
     tags: ['v*']
+    branches: [main]
+    paths: ['package.json']
+
+concurrency:
+  group: publication
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -22,20 +30,37 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: L'étiquette correspond à la version
+      - name: Version à publier
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version="$(node -p "require('./package.json').version")"
-          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "::error::Étiquette ${GITHUB_REF_NAME} ≠ version ${version} de package.json"; exit 1; }
+          tag="v${version}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            [ "${tag}" = "${GITHUB_REF_NAME}" ] || { echo "::error::Étiquette ${GITHUB_REF_NAME} ≠ version ${version} de package.json"; exit 1; }
+            publish=true
+          elif gh release view "${tag}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "La version ${tag} est déjà publiée : rien à faire."
+            publish=false
+          else
+            publish=true
+          fi
+          { echo "tag=${tag}"; echo "version=${version}"; echo "publish=${publish}"; } >> "$GITHUB_OUTPUT"
       - name: Construction de la version (tests compris)
+        if: steps.v.outputs.publish == 'true'
         env:
           LIMS_COMMIT: ${{ github.sha }}
         run: bash scripts/make-release.sh
       - name: Publication dans GitHub Releases
+        if: steps.v.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           {
+            if [ -f "docs/notes/v${version}.md" ]; then cat "docs/notes/v${version}.md"; echo; fi
             echo "Installation (Ubuntu 24.04 LTS) :"
             echo
             echo '```bash'
@@ -48,9 +73,10 @@ jobs:
           } > notes.md
           files=("dist-release/lims-${version}.tar.gz" "dist-release/lims-${version}.tar.gz.sha256" dist-release/latest.json)
           # Étiquette posée depuis la page « Releases » de GitHub : la publication existe déjà, on y joint les fichiers.
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
-            gh release edit "${GITHUB_REF_NAME}" --title "LIMS ${version}" --notes-file notes.md
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${files[@]}" --clobber
+            gh release edit "${TAG}" --title "LIMS ${version}" --notes-file notes.md
           else
-            gh release create "${GITHUB_REF_NAME}" "${files[@]}" --title "LIMS ${version}" --notes-file notes.md
+            # Publication depuis main : l'étiquette est créée sur le commit construit.
+            gh release create "${TAG}" "${files[@]}" --target "${GITHUB_SHA}" --title "LIMS ${version}" --notes-file notes.md --latest
           fi

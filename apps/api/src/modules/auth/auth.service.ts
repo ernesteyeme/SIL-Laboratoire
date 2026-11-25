@@ -172,7 +172,8 @@ export class AuthService {
   async me(current: RequestUser): Promise<AuthUser> {
     const user = await this.users.findById(current.id);
     if (!user) throw invalidRefresh();
-    return toAuthUser(user);
+    const sections = await this.prisma.userSection.findMany({ where: { userId: user.id }, select: { sectionId: true } });
+    return toAuthUser(user, sections.map((s) => s.sectionId));
   }
 
   async changePassword(current: RequestUser, input: ChangePasswordInput, client: ClientInfo): Promise<IssuedSession> {

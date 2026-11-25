@@ -35,6 +35,7 @@ import type { RequestUser } from '../../core/context/request-context';
 import { BusinessRuleError, ConflictError, DomainException, NotFoundError } from '../../core/errors/domain.exception';
 import { labPeriods } from '../../core/numbering/numbering.service';
 import { PrismaService, type Db } from '../../core/prisma/prisma.service';
+import { SectionAccessService } from '../../core/security/section-access.service';
 import { isExpired, runUserIds, toMaterialDto, toParameterRef, toRunDto, toTargetDto } from './qc.mapper';
 import { QcRepository } from './qc.repository';
 import { QualityIssuesService } from './quality-issues.service';
@@ -49,7 +50,14 @@ export class QcService {
     private readonly issues: QualityIssuesService,
     private readonly lab: LabContextService,
     private readonly audit: AuditService,
+    private readonly sections: SectionAccessService,
   ) {}
+
+  /** Habilitations par service : le contrôle d'un paramètre relève du service de son examen. */
+  private async assertParameterSection(tx: Db, parameterId: string, actor: RequestUser, action: string): Promise<void> {
+    const p = await tx.examParameter.findUnique({ where: { id: parameterId }, select: { exam: { select: { section: { select: { id: true, name: true } } } } } });
+    if (p) await this.sections.assertCanAct(tx, actor, p.exam.section, action);
+  }
 
   private async today(): Promise<{ iso: string; tz: string }> {
     const { timezone } = await this.lab.settings();
@@ -229,6 +237,7 @@ export class QcService {
         await this.repo.lockParameter(input.parameterId, tx);
         const parameter = await this.repo.findParameter(input.parameterId, tx);
         if (!parameter) throw new NotFoundError('Paramètre', input.parameterId);
+        await this.assertParameterSection(tx, parameter.id, actor, 'saisie d’un contrôle qualité');
         const performedAt = input.performedAt ? new Date(input.performedAt) : new Date();
 
         const pending = await this.repo.unresolvedRejected(parameter.id, tx);
@@ -312,6 +321,7 @@ export class QcService {
       const run = await tx.qcRun.findUnique({ where: { id } });
       if (!run) throw new NotFoundError('Série de contrôle', id);
       await this.repo.lockParameter(run.parameterId, tx);
+      await this.assertParameterSection(tx, run.parameterId, actor, 'action corrective de contrôle qualité');
       if (run.status !== 'REJECTED') throw new BusinessRuleError('QC_NOT_REJECTED', 'Seule une série rejetée appelle une action corrective.');
       if (run.resolvedAt) throw new BusinessRuleError('QC_ALREADY_RESOLVED', 'L’action corrective de cette série est déjà documentée.');
       if (run.excludedAt) throw new BusinessRuleError('QC_EXCLUDED', 'Cette série a été exclue.');
